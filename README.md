@@ -7,29 +7,17 @@ The skill can **read** every playlist you have but **writes only playlists it cr
 Your stock, subscribed and hand-made playlists cannot be modified or deleted by it. To
 change one, it clones it into a new playlist first.
 
-## Install
+## Use
 
-Claude Code discovers skills from `~/.claude/skills/<name>/` (all projects) and
-`<project>/.claude/skills/<name>/` (that project only) — it does not scan arbitrary
-directories. Since managing playlists has nothing to do with whichever repo you happen
-to be working in, this belongs in the personal location.
-
-The repo root *is* the skill directory, so either put the repo there directly:
+The skill lives at `.claude/skills/kovaaks-playlists/`, so it loads automatically when
+you start Claude Code in this repo — nothing to install:
 
 ```
-git clone <this repo> "%USERPROFILE%\.claude\skills\kovaaks-playlists"
+cd claude-kovaaks
+claude
 ```
 
-or keep it wherever you like and link it in — symlinked skill directories are supported,
-and a junction (`/J`) needs no administrator rights:
-
-```
-mkdir "%USERPROFILE%\.claude\skills"
-mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" "C:\Users\8alex\git\claude-kovaaks"
-```
-
-If `~/.claude/skills` did not exist when your Claude Code session started, restart it so
-the new directory gets watched. Then just ask Claude for what you want — "make me a warmup playlist with some easy tracking scenarios", "what's in my VDIM
+Then just ask for what you want — "make me a warmup playlist with some easy tracking scenarios", "what's in my VDIM
 tracking playlist", "import the Voltaic S5 novice benchmarks".
 
 Requires Python 3 (stdlib only, no packages) and a KovaaK's install.
@@ -37,6 +25,7 @@ Requires Python 3 (stdlib only, no packages) and a KovaaK's install.
 ## Direct use
 
 ```
+cd .claude/skills/kovaaks-playlists
 python scripts/kvpl.py list
 python scripts/kvpl.py show "1 - Basic"
 python scripts/kvpl.py search-scenarios "smooth" --aim-type Tracking
@@ -56,15 +45,26 @@ direction, and you can always clone it again.
 ## Layout
 
 ```
-SKILL.md               the skill Claude reads
-scripts/kvpl.py        the CLI, single file, stdlib only
-references/kovaaks.md  on-disk format and API notes, all verified against a real install
-tests/                 four tests: encodings, byte-exact writes, the gate, cloning
-docs/                  design spec
+.claude/skills/kovaaks-playlists/
+    SKILL.md             the skill Claude reads
+    scripts/kvpl.py      the CLI, single file, stdlib only
+    references/kovaaks.md   on-disk format and API notes, verified against a real install
+tests/                   four tests: encodings, byte-exact writes, the gate, cloning
+docs/                    design spec
 ```
 
 ```
 python -m unittest discover -s tests
+```
+
+To use the skill outside this repo as well, link the skill directory into your personal
+skills folder. Symlinked skill directories are supported, and a junction (`/J`) needs no
+administrator rights:
+
+```
+mkdir "%USERPROFILE%\.claude\skills"
+mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" ^
+  "C:\Users\8alex\git\claude-kovaaks\.claude\skills\kovaaks-playlists"
 ```
 
 ## Scope

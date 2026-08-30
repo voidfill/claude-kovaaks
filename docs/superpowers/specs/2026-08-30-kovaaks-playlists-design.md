@@ -90,9 +90,10 @@ state the user did not want) and a filename prefix (visible in-game, rename-frag
 
 ```
 claude-kovaaks/
-├── SKILL.md                 # the skill; repo root IS the skill directory
-├── scripts/kvpl.py          # single file, stdlib only
-├── references/kovaaks.md    # on-disk format + verified API endpoints
+├── .claude/skills/kovaaks-playlists/
+│   ├── SKILL.md             # the skill
+│   ├── scripts/kvpl.py      # single file, stdlib only
+│   └── references/kovaaks.md    # on-disk format + verified API endpoints
 ├── tests/
 │   ├── test_kvpl.py
 │   └── fixtures/
@@ -100,11 +101,14 @@ claude-kovaaks/
 └── README.md
 ```
 
-Install, no admin needed:
+As a project skill it loads with no install step whenever Claude Code starts in this
+repo. Claude Code discovers skills only from `~/.claude/skills/<name>/` (all projects)
+and `<project>/.claude/skills/<name>/` (that project) — never from arbitrary paths. To
+use it from elsewhere as well, junction the skill directory into the personal location;
+symlinked skill directories are supported and `/J` needs no admin rights.
 
-```
-mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" "C:\Users\8alex\git\claude-kovaaks"
-```
+Scripts must be referenced as `${CLAUDE_SKILL_DIR}/scripts/kvpl.py`. A path relative to
+the working directory only resolves when the session happens to start in the repo.
 
 ## CLI
 

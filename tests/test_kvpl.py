@@ -11,7 +11,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(__file__), "..", ".claude", "skills", "kovaaks-playlists", "scripts"))
 import kvpl  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
