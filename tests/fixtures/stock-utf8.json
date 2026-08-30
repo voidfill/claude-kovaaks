@@ -1,0 +1,67 @@
+{
+	"playlistName": "1 - Basic",
+	"playlistId": 4,
+	"authorSteamId": "76561198066375616",
+	"authorName": "DrUninstall",
+	"scenarioList": [
+		{
+			"scenario_name": "Smoothness Training 60",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Close Long Strafes Easy",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "air far long strafes %70",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Flip off Flick Random",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Jumbo 1wall6targets TE",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Wide Wall 3 Targets TE",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Tall Wall 6 (Distance)",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Bounce 180 Sparky Jumbo",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Fireworks Flick Easy",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Tile Frenzy 180 Strafing 200 Percent Tracking",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "voxTS Viscose Varied",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Bounce 180 Tracking Large Slower TTK",
+			"play_Count": 2
+		},
+		{
+			"scenario_name": "Cata Reflex Easy",
+			"play_Count": 2
+		}
+	],
+	"description": "If you're new to mouse and keyboard, you will probably want to start here and play this for 2-4 weeks. \r\nThis is a good playlist to come back to once in a while to see if new highscores can be achieved!",
+	"hasOfflineScenarios": false,
+	"hasEdited": false,
+	"shareCode": "KovaaKsAfking360Cashdrop",
+	"version": 31,
+	"updated": 1682026127,
+	"isPrivate": false
+}
