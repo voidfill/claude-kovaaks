@@ -35,6 +35,15 @@ KEY_ORDER = [
 PLAYLIST_VERSION = 31
 BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Session length model. Scenarios are built around a 60s run because fatigue dominates
+# past that, so play time is flat rather than read from each .sce -- which would only
+# work for installed scenarios anyway, and whose Timelimit is a sentinel (1000.0) on
+# killcount-terminated scenarios. The overhead splits: loading a scenario and settling
+# into it costs more than restarting the one already on screen.
+PLAY_MINUTES = 1.0      # per run
+LOAD_MINUTES = 1.0      # once per scenario in the playlist
+RESTART_MINUTES = 0.5   # per repeat run of a scenario already loaded
+
 
 class Fail(Exception):
     def __init__(self, message, code=EXIT_INPUT):
@@ -189,11 +198,26 @@ def installed_index(cfg):
     return names
 
 
+def estimate_minutes(scenario_list):
+    """Rough session length in minutes for a scenarioList. See the constants above."""
+    entries = runs = 0
+    for entry in scenario_list or []:
+        try:
+            count = int(entry.get("play_Count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        entries += 1
+        runs += max(1, count)
+    total = (runs * PLAY_MINUTES + entries * LOAD_MINUTES
+             + (runs - entries) * RESTART_MINUTES)
+    return round(total, 1)
+
+
 def scenario_entry(name, count):
     return {"scenario_name": name, "play_Count": int(count)}
 
 
-def new_playlist(cfg, name, scenarios, description, installed):
+def new_playlist(cfg, name, scenarios, description):
     return {
         "playlistName": name,
         "playlistId": 0,
@@ -201,7 +225,9 @@ def new_playlist(cfg, name, scenarios, description, installed):
         "authorName": cfg.author_name,
         "scenarioList": scenarios,
         "description": description,
-        "hasOfflineScenarios": any(s["scenario_name"] not in installed for s in scenarios),
+        # Always false. The game errors on playlists that claim offline scenarios, and
+        # every stock file says false even when it references scenarios the user lacks.
+        "hasOfflineScenarios": False,
         "hasEdited": True,
         "shareCode": "",
         "version": PLAYLIST_VERSION,
@@ -210,12 +236,11 @@ def new_playlist(cfg, name, scenarios, description, installed):
     }
 
 
-def touch(data, installed):
+def touch(data):
     """Refresh the fields that must change on every edit."""
     data["updated"] = int(time.time())
     data["hasEdited"] = True
-    data["hasOfflineScenarios"] = any(
-        s.get("scenario_name") not in installed for s in data.get("scenarioList", []))
+    data["hasOfflineScenarios"] = False  # see new_playlist
 
 
 def find_scenario(data, name):
@@ -287,6 +312,7 @@ def cmd_list(cfg, args):
             "name": data.get("playlistName", name),
             "managed": is_managed(data),
             "scenarios": len(data.get("scenarioList", [])),
+            "estimatedMinutes": estimate_minutes(data.get("scenarioList")),
             "author": data.get("authorName", ""),
         })
     if args.managed_only:
@@ -314,6 +340,7 @@ def cmd_show(cfg, args):
         "playlistId": data.get("playlistId"),
         "description": data.get("description", ""),
         "scenarioCount": len(scenarios),
+        "estimatedMinutes": estimate_minutes(data.get("scenarioList")),
         "notInstalled": sum(1 for s in scenarios if not s["installed"]),
         "scenarios": scenarios,
     })
@@ -348,13 +375,14 @@ def cmd_create(cfg, args):
         scenarios.append(scenario_entry(name, count))
 
     installed = installed_index(cfg)
-    data = new_playlist(cfg, args.name, scenarios, description, installed)
+    data = new_playlist(cfg, args.name, scenarios, description)
     write_playlist(path, data)
     out({
         "created": args.name,
         "file": path,
         "author": data["authorName"],
         "scenarios": len(scenarios),
+        "estimatedMinutes": estimate_minutes(scenarios),
         "notInstalled": [s["scenario_name"] for s in scenarios
                          if s["scenario_name"] not in installed],
     })
@@ -372,11 +400,12 @@ def cmd_add(cfg, args):
     else:
         index = max(0, args.at)
         scenarios.insert(index, entry)
-    touch(data, installed)
+    touch(data)
     write_playlist(path, data)
     result = {"playlist": args.name, "added": args.scenario,
               "playCount": args.count, "index": index,
-              "scenarios": len(scenarios)}
+              "scenarios": len(scenarios),
+              "estimatedMinutes": estimate_minutes(scenarios)}
     if args.scenario not in installed:
         result["warning"] = ('"%s" is not installed locally. KovaaK\'s may prompt to '
                              "download it, or the entry may not be playable."
@@ -395,10 +424,11 @@ def cmd_remove(cfg, args):
     else:
         index = find_scenario(data, args.scenario)
     removed = scenarios.pop(index)
-    touch(data, installed_index(cfg))
+    touch(data)
     write_playlist(path, data)
     out({"playlist": args.name, "removed": removed.get("scenario_name"),
-         "index": index, "scenarios": len(scenarios)})
+         "index": index, "scenarios": len(scenarios),
+         "estimatedMinutes": estimate_minutes(scenarios)})
 
 
 def cmd_move(cfg, args):
@@ -411,10 +441,11 @@ def cmd_move(cfg, args):
         raise Fail("--to %d is out of range (0-%d)." % (args.to_index, len(scenarios) - 1))
     entry = scenarios.pop(args.from_index)
     scenarios.insert(args.to_index, entry)
-    touch(data, installed_index(cfg))
+    touch(data)
     write_playlist(path, data)
     out({"playlist": args.name, "moved": entry.get("scenario_name"),
-         "from": args.from_index, "to": args.to_index})
+         "from": args.from_index, "to": args.to_index,
+         "estimatedMinutes": estimate_minutes(scenarios)})
 
 
 def cmd_set_count(cfg, args):
@@ -422,16 +453,17 @@ def cmd_set_count(cfg, args):
     assert_managed(args.name, data)
     index = find_scenario(data, args.scenario)
     data["scenarioList"][index]["play_Count"] = args.count
-    touch(data, installed_index(cfg))
+    touch(data)
     write_playlist(path, data)
-    out({"playlist": args.name, "scenario": args.scenario, "playCount": args.count})
+    out({"playlist": args.name, "scenario": args.scenario, "playCount": args.count,
+         "estimatedMinutes": estimate_minutes(data["scenarioList"])})
 
 
 def cmd_set_description(cfg, args):
     path, data = load_playlist(cfg, args.name)
     assert_managed(args.name, data)
     data["description"] = args.description
-    touch(data, installed_index(cfg))
+    touch(data)
     write_playlist(path, data)
     out({"playlist": args.name, "description": args.description})
 
@@ -462,7 +494,7 @@ def cmd_rename(cfg, args):
         raise Fail('A playlist named "%s" already exists.' % args.new_name)
     stale = sibling_references(cfg, args.name)
     data["playlistName"] = args.new_name
-    touch(data, installed_index(cfg))
+    touch(data)
     write_playlist(target, data)
     os.remove(path)
     result = {"renamed": args.name, "to": args.new_name, "file": target}
@@ -558,7 +590,7 @@ def cmd_import(cfg, args):
     installed = installed_index(cfg)
     playlist = new_playlist(cfg, args.new_name, scenarios,
                             args.description if args.description is not None
-                            else source.get("description", ""), installed)
+                            else source.get("description", ""))
     write_playlist(path, playlist)
     out({
         "imported": source.get("playlistName"),
@@ -567,6 +599,7 @@ def cmd_import(cfg, args):
         "sourcePlaylistId": source.get("playlistId"),
         "sourceCode": source.get("playlistCode"),
         "scenarios": len(scenarios),
+        "estimatedMinutes": estimate_minutes(scenarios),
         "notInstalled": [s["scenario_name"] for s in scenarios
                          if s["scenario_name"] not in installed],
     })

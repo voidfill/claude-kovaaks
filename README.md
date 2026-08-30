@@ -59,12 +59,12 @@ python -m unittest discover -s tests
 
 To use the skill outside this repo as well, link the skill directory into your personal
 skills folder. Symlinked skill directories are supported, and a junction (`/J`) needs no
-administrator rights:
+administrator rights. Run this from the repository root:
 
 ```
 mkdir "%USERPROFILE%\.claude\skills"
 mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" ^
-  "C:\Users\8alex\git\claude-kovaaks\.claude\skills\kovaaks-playlists"
+  "%CD%\.claude\skills\kovaaks-playlists"
 ```
 
 ## Scope

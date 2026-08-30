@@ -59,8 +59,8 @@ appears in any of them.
 
 ```json
 "playlistId": 0,
-"authorSteamId": "76561199007330275",
-"authorName": "voidfill [claude-kovaaks]",
+"authorSteamId": "<SteamID64 read from loginusers.vdf>",
+"authorName": "<persona name> [claude-kovaaks]",
 "shareCode": "",
 "version": 31,
 "hasEdited": true,

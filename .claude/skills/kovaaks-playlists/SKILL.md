@@ -89,6 +89,32 @@ confirm which playlist you are importing.
 `PlaylistInProgress.json` refer to playlists by name; `rename` warns when the old name
 appears in them. The user has to fix those in-game.
 
+## Benchmarks
+
+Most playlist requests are phrased in benchmark vocabulary — *"a precise tracking
+playlist for around intermediate"*, *"something for diamond level"*. Two benchmarks are
+covered: **Voltaic** (written `VT`, current season S5, trained via VDIM) and **Viscose**
+(season S2, trained by running the benchmark directly).
+
+Read `references/benchmarks.md` before answering any such request, then the one file for
+the benchmark in play. It carries the exact scenario names, difficulty tiers, rank
+mappings and group tables.
+
+Three things to get right:
+
+- **Ask which benchmark**, unless the user said. Voltaic and Viscose group scenarios
+  completely differently and share almost no scenarios.
+- **Ask which source.** Benchmark scenarios only, benchmark plus official sub-variants,
+  or the full VDIM block with its warmup scenarios — same request, very different
+  playlists.
+- **Respect a time budget** when the user gives one. Every command that reports a
+  playlist returns `estimatedMinutes`; `references/benchmarks.md` has the model and the
+  order to cut in. A VDIM day is about two hours, so most time-boxed asks need trimming.
+- **Resolve every name** through `search-scenarios`, which queries the web index and so
+  works on any machine. Never treat the local install as the authority on what a
+  benchmark contains — the user may own none of it. Report missing scenarios after
+  creating the playlist rather than dropping them.
+
 ## Configuration
 
 Paths and identity are auto-detected: the default Steam install location, and the user's
@@ -99,6 +125,10 @@ with exit code 4 naming the path.
 Exit codes: `2` bad input, `3` ownership refusal, `4` path/config problem.
 
 ## Reference
+
+`references/benchmarks.md` indexes the Voltaic and Viscose benchmarks and defines the
+shape a new benchmark file must follow; `references/benchmarks/*.md` hold the
+per-benchmark scenario tables.
 
 `references/kovaaks.md` documents the on-disk playlist format, the encodings the game
 emits, and the verified API endpoints. Read it before changing `scripts/kvpl.py`.

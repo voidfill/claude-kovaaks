@@ -39,8 +39,10 @@ inconsistent casing, which is the game's, not a typo.
 
 The game emits **two** encodings and reads both back:
 
-- UTF-8, no BOM, CRLF line endings, tab indent — 19 of 23 files on this machine.
-- UTF-16LE **with BOM**, same structure — 4 files (the VDIM "Switching" playlists).
+- UTF-8, no BOM, CRLF line endings, tab indent — the common case (19 of the 23 playlists
+  on the install this was verified against).
+- UTF-16LE **with BOM**, same structure — the rest (there, the VDIM "Switching"
+  playlists). Any install may hold both; do not assume either.
 
 Those four filenames also contain an invisible **U+200E** (left-to-right mark) between
 the dash and the word. It must be preserved when matching by name, and it is why the CLI
@@ -65,10 +67,13 @@ No BOM and no trailing newline — the file ends at the closing `}`.
 - `shareCode` — set on published playlists, empty otherwise.
 - `version` — `31` on every file observed.
 - `updated` — Unix epoch seconds.
-- `hasOfflineScenarios` — **semantics inferred.** Every stock file says `false` even
-  where scenarios are demonstrably missing (`1 - Basic` references 9 the user does not
-  have). The CLI computes it from the installed index. If that ever misbehaves in-game,
-  hardcode `false` to match observed reality.
+- `hasOfflineScenarios` — **always written as `false`.** The game errors on playlists
+  that claim offline scenarios, and every stock file says `false` anyway, even where
+  scenarios are demonstrably missing (the stock `1 - Basic` referenced 9 that were absent
+  on the install this was verified against).
+  The CLI used to compute it from the installed index; it no longer does, and nothing
+  should reintroduce that. A playlist may freely reference scenarios the user lacks —
+  report them to the user instead of encoding them in this field.
 
 ### Sibling files that reference playlists by name
 
