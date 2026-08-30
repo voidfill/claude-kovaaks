@@ -9,15 +9,27 @@ change one, it clones it into a new playlist first.
 
 ## Install
 
-The repo root is the skill directory, so link it into your skills folder:
+Claude Code discovers skills from `~/.claude/skills/<name>/` (all projects) and
+`<project>/.claude/skills/<name>/` (that project only) — it does not scan arbitrary
+directories. Since managing playlists has nothing to do with whichever repo you happen
+to be working in, this belongs in the personal location.
+
+The repo root *is* the skill directory, so either put the repo there directly:
+
+```
+git clone <this repo> "%USERPROFILE%\.claude\skills\kovaaks-playlists"
+```
+
+or keep it wherever you like and link it in — symlinked skill directories are supported,
+and a junction (`/J`) needs no administrator rights:
 
 ```
 mkdir "%USERPROFILE%\.claude\skills"
 mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" "C:\Users\8alex\git\claude-kovaaks"
 ```
 
-A junction (`/J`) does not need administrator rights. Then just ask Claude for what you
-want — "make me a warmup playlist with some easy tracking scenarios", "what's in my VDIM
+If `~/.claude/skills` did not exist when your Claude Code session started, restart it so
+the new directory gets watched. Then just ask Claude for what you want — "make me a warmup playlist with some easy tracking scenarios", "what's in my VDIM
 tracking playlist", "import the Voltaic S5 novice benchmarks".
 
 Requires Python 3 (stdlib only, no packages) and a KovaaK's install.

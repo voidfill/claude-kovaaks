@@ -1,5 +1,6 @@
 ---
 name: kovaaks-playlists
+allowed-tools: Bash(python "${CLAUDE_SKILL_DIR}/scripts/kvpl.py" *)
 description: Use when creating, editing, inspecting or deleting local KovaaK's aim-trainer playlists, or when searching the KovaaK's scenario/playlist index to build one - covers adding and reordering scenarios, setting play counts, cloning stock playlists, and importing community playlists.
 ---
 
@@ -12,8 +13,11 @@ byte format the game expects (UTF-8, CRLF, tabs, fixed key order) and enforces t
 ownership rule below.
 
 ```
-python scripts/kvpl.py <command> [args]
+python "${CLAUDE_SKILL_DIR}/scripts/kvpl.py" <command> [args]
 ```
+
+`${CLAUDE_SKILL_DIR}` resolves to this skill's directory, so the command works from any
+working directory. Do not use a relative path.
 
 ## The ownership rule
 
@@ -25,7 +29,7 @@ This is not a suggestion you can work around; it is enforced in the code. When t
 wants to change a stock playlist, clone it first:
 
 ```
-python scripts/kvpl.py create "My Tracking Warmup" --from-playlist "VDIM Novice S5 - Tracking I"
+python "${CLAUDE_SKILL_DIR}/scripts/kvpl.py" create "My Tracking Warmup" --from-playlist "VDIM Novice S5 - Tracking I"
 ```
 
 Then edit the clone. Tell the user you did this and why — they asked for a change to
