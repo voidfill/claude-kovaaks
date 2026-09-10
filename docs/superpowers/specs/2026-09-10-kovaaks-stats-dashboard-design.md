@@ -27,6 +27,7 @@ Measured on a real install on 2026-09-10, not assumed.
 | Stats dir | `<root>/stats/*.csv` — 2311 files, 9.6 MB |
 | Perf dir | `<root>/performances/*.perf` — 2001 files, 9.7 MB |
 | Runs with both | 1993. CSV-only: 318. Perf-only (orphans): 8 |
+| `.perf` write lag behind its CSV | median 3 ms, p95 6 ms, max 30 ms (1993 pairs) |
 | Distinct scenarios | 316 |
 | History | 2025-12-27 .. 2026-09-10, 101 active days, median 20 runs/day, peak 81 |
 | Runs per scenario | 94 have exactly 1, 163 have 2–9, 59 have 10+ |
@@ -255,8 +256,22 @@ kvstats/
 `struct`. Charts use uPlot (MIT, ~45 KB, single file, zero deps, canvas) committed under
 `web/vendor/`. No npm, no bundler, no CDN — it works offline.
 
-Polling rather than `watchdog`: `scandir` over 4300 filenames takes ~3 ms, so a 2 s poll
-costs roughly 0.15% of one core and removes a dependency.
+**Two-tier polling rather than `watchdog`.** Measured on this install:
+
+| Probe | Cost |
+|---|---|
+| `scandir` both dirs (4312 entries) | 10.85 ms median |
+| `stat()` both dirs (mtime only) | **0.034 ms** median |
+
+`stat()` the two directories every **100 ms** and `scandir` only when a directory's
+mtime has moved (confirmed to advance on file creation). Idle cost is 0.03% of one
+core -- less than a 2 s scandir poll -- while detection latency drops to <=100 ms.
+A full `scandir` every 10 s regardless self-heals if the mtime signal is ever missed
+on a filesystem where it is unreliable.
+
+This meets the latency requirement without a dependency: **~170 ms** worst case from
+run-end to rendered comparison (100 ms detect + 11 ms scandir + 10 ms parse + ~50 ms
+push/fetch/render).
 
 Endpoints:
 
@@ -275,16 +290,19 @@ scenario play counts (the `run 3/4` indicator). It degrades to absent.
 
 ## Live path and its hazards
 
-Poll → `scandir` both dirs → diff against an in-memory `known` set seeded from the DB →
+Tick (100 ms) → `stat()` both dirs → on mtime change `scandir` → diff against an
+in-memory `known` set seeded from the DB →
 parse → insert → push `{"type":"run","id":N}` over SSE → browser fetches and re-renders.
 
 The CSV and the `.perf` for one run are written **separately**, and a scan can catch a
 file mid-write. Three guards:
 
-- **Index off the CSV immediately; never block on the perf.** The run appears the moment
-  it is readable. Its perf attaches on a later scan via a short *awaiting-perf* list with
-  a ~60 s deadline, after which `perf_file` stays NULL — already a supported state for
-  318 runs. Orphan perfs with no CSV (8 observed) are ignored.
+- **Index off the CSV immediately; never block on the perf.** In practice the perf is
+  already there: across 1993 pairs its mtime trails the CSV by a median of 3 ms and a
+  maximum of 30 ms, so a run detected at the 100 ms tick has its curve on disk. The
+  *awaiting-perf* list therefore exists for correctness, not latency -- it holds a run
+  for a ~60 s deadline, after which `perf_file` stays NULL, already a supported state
+  for 318 runs. Orphan perfs with no CSV (8 observed) are ignored.
 - **A parse failure is neither fatal nor permanent.** On exception the path is not added
   to `known`, so the next tick retries; after 5 tries it lands in `failed` and stops.
   A mid-write file therefore resolves itself 2 s later.
