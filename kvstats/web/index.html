@@ -1,2 +1,54 @@
-<!-- kvstats -->
-<h1>kvstats</h1>
+<!doctype html>
+<meta charset="utf-8">
+<title>kvstats</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/web/style.css">
+
+<header>
+  <h1>kvstats</h1>
+  <span id="status" class="muted">connecting</span>
+</header>
+
+<main>
+  <section id="focus">
+    <h2 id="scenario">waiting for a run</h2>
+    <div id="headline"></div>
+    <div id="deltas"></div>
+  </section>
+
+  <section id="controls">
+    <label>metric
+      <select id="metric">
+        <option value="score">score / s</option>
+        <option value="shots">shots / s</option>
+        <option value="hits">hits / s</option>
+        <option value="kills">kills / s</option>
+        <option value="accuracy">accuracy</option>
+        <option value="efficiency">efficiency</option>
+      </select>
+    </label>
+    <label>smoothing
+      <select id="smoothing">
+        <option value="1">raw</option>
+        <option value="3">3 s</option>
+        <option value="5" selected>5 s</option>
+      </select>
+    </label>
+    <label>recent N
+      <input id="recent" type="number" min="1" max="50" value="10">
+    </label>
+    <label><input id="samecfg" type="checkbox" checked> same sensitivity only</label>
+  </section>
+
+  <div id="rate" class="chart"></div>
+  <div id="delta" class="chart"></div>
+
+  <section id="session">
+    <h3>recent runs</h3>
+    <ol id="runs"></ol>
+  </section>
+</main>
+
+<script src="/web/vendor/uPlot.iife.min.js"></script>
+<script src="/web/app.js"></script>
