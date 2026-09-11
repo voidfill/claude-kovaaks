@@ -95,15 +95,10 @@ def _focus(conn, run_id):
 
 
 def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE):
-    """Other runs of the same scenario that this run can fairly be judged against.
-
-    Restricted to runs strictly before the focus run: a baseline built from a
-    run that hadn't happened yet would leak the future into a replay of an
-    earlier session, for the PB pool exactly as much as for recent form.
-    """
+    """Other runs of the same scenario that this run can fairly be judged against."""
     focus = _focus(conn, run_id)
-    sql = "SELECT * FROM run WHERE scenario=? AND id<>? AND started_at<?"
-    args = [focus["scenario"], run_id, focus["started_at"]]
+    sql = "SELECT * FROM run WHERE scenario=? AND id<>?"
+    args = [focus["scenario"], run_id]
     if same_cfg and focus["cfg_key"] is not None:
         sql += " AND cfg_key IS ?"
         args.append(focus["cfg_key"])

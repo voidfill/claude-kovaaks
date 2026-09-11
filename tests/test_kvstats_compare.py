@@ -134,7 +134,9 @@ class Baselines(unittest.TestCase):
         got = compare.baselines(self.conn, focus)
         self.assertEqual(got["recent"]["n"], 1)
         self.assertEqual(got["recent"]["mean_score"], 100)
-        self.assertEqual(got["candidates"], 1)
+        # PB is all-time, so the later 999 run is a legitimate candidate; only
+        # `recent` is scoped to look backwards. Don't "fix" this back to 1.
+        self.assertEqual(got["candidates"], 2)
 
     def test_a_first_ever_run_yields_no_baselines_but_does_not_raise(self):
         focus = self.add("S", "2026-01-01T10:00:00", 200, curve=[2.0] * 60)
