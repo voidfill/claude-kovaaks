@@ -201,7 +201,10 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
 
             if route == "/api/runs":
                 scenario = one("scenario")
-                limit = int(one("limit", "50"))
+                try:
+                    limit = int(one("limit", "50"))
+                except ValueError as error:
+                    return self._json({"error": str(error)}, 400)
                 if scenario:
                     return self._json(_rows(
                         conn,
