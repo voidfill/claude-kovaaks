@@ -71,8 +71,13 @@ def connect(db_path):
     # check_same_thread=False is REQUIRED, not an optimisation: the watcher
     # runs in its own thread and ThreadingHTTPServer gives every request a new
     # one. Without it every /api/* call and every index write raises
-    # ProgrammingError. sqlite3.threadsafety == 3 (serialized) here, and WAL is
-    # enabled before any concurrent access, so sharing a connection is safe.
+    # ProgrammingError. This is safe because sqlite3.threadsafety == 3
+    # (serialized) here: the sqlite3 module's own connection mutex serializes
+    # concurrent use of one connection across threads. That guarantee is
+    # independent of journal mode -- WAL (set by serve() at runtime, not
+    # here) changes concurrent readers/writers semantics, not thread safety,
+    # so every test and every direct connect()/make_server() caller that
+    # never enables WAL is just as safe.
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

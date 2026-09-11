@@ -34,8 +34,22 @@ function drawRate(payload) {
   const t = Array.from({ length: n }, (_, i) => i);
   const series = [{}, { label: "this run", stroke: "#e6e8ec", width: 2 }];
   const data = [t, payload.curve];
+  const bands = [];
 
   if (payload.recent_band) {
+    // uPlot's band is drawn between two series by index. Fit lo/hi exactly
+    // like mean, or the fill misaligns against the focused run on the ~6% of
+    // runs whose baseline curves are a different length. The bound series
+    // themselves are undrawn (width 0) and hidden from the legend via the
+    // "u-band-bound" class -- only the fill and the mean line are visible.
+    const hiIdx = series.length;
+    series.push({ label: "recent +1σ", class: "u-band-bound", stroke: "transparent", width: 0 });
+    data.push(fit(payload.recent_band.hi, n));
+    const loIdx = series.length;
+    series.push({ label: "recent -1σ", class: "u-band-bound", stroke: "transparent", width: 0 });
+    data.push(fit(payload.recent_band.lo, n));
+    bands.push({ series: [hiIdx, loIdx], fill: "rgba(59,130,246,.15)" });
+
     series.push({ label: "recent mean", stroke: "#3b82f6", width: 1, dash: [2, 3] });
     data.push(fit(payload.recent_band.mean, n));
   }
@@ -46,7 +60,7 @@ function drawRate(payload) {
 
   state.rate = destroy(state.rate);
   state.rate = new uPlot({
-    width: $("rate").clientWidth, height: 240, series, axes: axes(),
+    width: $("rate").clientWidth, height: 240, series, axes: axes(), bands,
     scales: { x: { time: false } }, cursor: { sync: { key: "kv" } },
   }, data, $("rate"));
 }
@@ -78,6 +92,8 @@ function drawDelta(payload) {
 }
 
 function pct(mine, base) {
+  // A baseline of 0 makes "percent change" undefined, not infinite or zero --
+  // !base also catches null/undefined baselines, which is the common case.
   if (!base) return null;
   return ((mine - base) / base) * 100;
 }
@@ -90,8 +106,12 @@ function renderHeadline(payload) {
   $("headline").textContent = run.score == null ? "--" : run.score.toFixed(0);
 
   const parts = [];
-  const signed = (d, label) =>
-    `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "+" : ""}${d.toFixed(1)}% ${label}</span>`;
+  // pct() returns null for an undefined percentage (e.g. a zero baseline
+  // score); render a dash instead of letting null.toFixed(1) throw and blank
+  // the whole dashboard before either chart draws.
+  const signed = (d, label) => d == null
+    ? `<span class="muted">-- ${label}</span>`
+    : `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "+" : ""}${d.toFixed(1)}% ${label}</span>`;
 
   // The percentage MUST be measured against whatever the delta chart is drawn
   // against, or the number and the chart contradict each other on exactly the

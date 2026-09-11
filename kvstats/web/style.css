@@ -31,3 +31,7 @@ select, input { background: #1c2027; color: var(--fg);
   cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
 #runs li.active { border-color: var(--pb); }
 .u-legend { font-size: .8rem; }
+/* The recent-form band's hi/lo bound series exist only to anchor the uPlot
+   fill between them -- they carry no line of their own, so their legend rows
+   would be a stroke-less, meaningless entry. */
+.u-legend .u-band-bound { display: none; }

@@ -18,6 +18,37 @@ from . import compare, index, watch
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
+# SQLite stores INTEGER as a signed 64-bit value. Plain int() has no such
+# ceiling -- it happily parses an arbitrarily large digit string -- so a huge
+# query-string value sails past the existing `except ValueError` guard and
+# only fails deep inside conn.execute, as an unhandled OverflowError that
+# kills the connection with no HTTP response at all.
+SQLITE_INT_MAX = 2 ** 63 - 1
+
+# /api/runs?limit=... has no natural ceiling from the UI (index.html never
+# asks for more than a few hundred rows), but two things make an unvalidated
+# value dangerous: a huge one overflows SQLite as above, and a *negative* one
+# is silently treated by SQLite as "no limit", returning the entire table
+# (2331 rows in the reference corpus). Cap well above any real UI request --
+# comfortably past "give me the whole table" -- so a legitimate large request
+# still works while both failure modes are rejected up front.
+MAX_LIMIT = 100_000
+
+
+def _bounded_int(raw, minimum, maximum):
+    """int(raw), rejecting values outside [minimum, maximum].
+
+    Raises ValueError for both non-numeric input (same as plain int()) and
+    in-range-for-Python-but-out-of-range-for-us input, so callers keep a
+    single except ValueError branch instead of needing a second error path
+    for the overflow case.
+    """
+    value = int(raw)
+    if value < minimum or value > maximum:
+        raise ValueError(f"{raw!r} out of range [{minimum}, {maximum}]")
+    return value
+
+
 METRICS = {
     "score": ("score", None),
     "shots": ("shots", None),
@@ -43,6 +74,12 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
                       same_cfg=True):
     if metric not in METRICS:
         raise ValueError(f"unknown metric: {metric}")
+    # prior[-recent_n:] with recent_n<=0 is a Python slice quirk, not a
+    # request for "no recent runs": 0 means "all prior runs" and a negative
+    # value drops from the front instead of the back. Neither is reachable
+    # from the UI (index.html clamps to min="1"), but the query string is not
+    # validated, so clamp defensively at the boundary too.
+    recent_n = max(recent_n, 0)
 
     row = conn.execute("SELECT * FROM run WHERE id=?", (run_id,)).fetchone()
     if row is None:
@@ -202,7 +239,7 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
             if route == "/api/runs":
                 scenario = one("scenario")
                 try:
-                    limit = int(one("limit", "50"))
+                    limit = _bounded_int(one("limit", "50"), 0, MAX_LIMIT)
                 except ValueError as error:
                     return self._json({"error": str(error)}, 400)
                 if scenario:
@@ -238,7 +275,7 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
 
             if route.startswith("/api/run/"):
                 try:
-                    run_id = int(route.rsplit("/", 1)[-1])
+                    run_id = _bounded_int(route.rsplit("/", 1)[-1], 1, SQLITE_INT_MAX)
                 except ValueError:
                     return self._json({"error": "bad run id"}, 400)
                 try:

@@ -78,11 +78,20 @@ class Watcher:
         return new_ids
 
     def _attach_ready_perfs(self):
+        """Attach any `.perf` that has landed since the last tick.
+
+        Returns the run ids whose curve was just attached, so the caller can
+        re-announce them -- a run indexed before its `.perf` arrived was
+        already announced with an empty curve, and that first message is the
+        only one the browser gets unless we speak up again here.
+        """
+        attached = []
         for run_id in list(self._awaiting):
             perf_path, first_seen = self._awaiting[run_id]
             if os.path.exists(perf_path):
                 if index.attach_perf(self.conn, run_id, perf_path):
                     del self._awaiting[run_id]
+                    attached.append(run_id)
                     continue
                 # attach_perf already called record_failure. Stop once the file
                 # has burned its budget -- otherwise a corrupt .perf is
@@ -97,6 +106,7 @@ class Watcher:
                 # 318 runs in a real install never get a .perf. That is a
                 # supported state, not an error.
                 del self._awaiting[run_id]
+        return attached
 
     # -- the loop ---------------------------------------------------------
     def poll_once(self):
@@ -105,17 +115,28 @@ class Watcher:
         due = (now - self._last_full_scan) >= self.full_scan_every
 
         if not self._directories_changed() and not due:
-            self._attach_ready_perfs()
+            late = self._attach_ready_perfs()
+            if self.on_run:
+                for run_id in late:
+                    self.on_run(run_id)
             return []
 
         self.stats["scans"] += 1
         self._last_full_scan = now
         new_ids = self._scan_stats()
-        self._attach_ready_perfs()
+        late = self._attach_ready_perfs()
 
         if self.on_run:
             for run_id in new_ids:
                 self.on_run(run_id)
+            # A run whose perf attached in the _scan_stats call above (CSV
+            # and .perf arrived in the same tick) is already in new_ids and
+            # was just announced -- do not fire on_run twice for it. Only a
+            # run announced on an earlier, perf-less tick needs this second
+            # notification.
+            for run_id in late:
+                if run_id not in new_ids:
+                    self.on_run(run_id)
         return new_ids
 
     def run_forever(self, stop_event):

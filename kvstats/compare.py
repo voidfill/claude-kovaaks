@@ -152,7 +152,13 @@ def baselines(conn, run_id, recent_n=DEFAULT_RECENT_N, same_cfg=True,
             }
 
     prior = [r for r in rows if r["started_at"] < focus["started_at"]]
-    recent = prior[-recent_n:]
+    # prior[-recent_n:] misbehaves at the boundary: recent_n=0 slices as
+    # prior[0:], i.e. every prior run, and a negative recent_n drops runs off
+    # the front instead of returning none. Clamp here too, independent of any
+    # clamp upstream -- this function has its own default and is called
+    # directly by tests.
+    recent_n = max(recent_n, 0)
+    recent = prior[-recent_n:] if recent_n else []
     if recent:
         result["recent"]["n"] = len(recent)
         result["recent"]["mean_score"] = statistics.fmean(
