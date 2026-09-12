@@ -215,10 +215,14 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 /* ── split table ─────────────────────────────────────────── */
 #splitTable{border-collapse:collapse; width:100%; min-width:520px}
 #splitTable th,#splitTable td{
-  padding:6px 14px; text-align:right; border-bottom:1px solid var(--line);
+  padding:6px 22px; text-align:right; border-bottom:1px solid var(--line);
   font-family:var(--mono); font-size:12.5px;
   font-variant-numeric:tabular-nums lining-nums;
 }
+/* The wrap has no padding of its own, so the outer cells carry the panel's
+   inset -- 12px, the same as .panel-head, so BOT lines up under SPLITS. */
+#splitTable th:first-child,#splitTable td:first-child{padding-left:12px}
+#splitTable th:last-child,#splitTable td:last-child{padding-right:12px}
 #splitTable th{
   font-weight:500; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
   color:var(--faint); border-bottom-color:var(--line-2);
@@ -226,12 +230,13 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 #splitTable th:first-child,#splitTable td:first-child{text-align:left}
 #splitTable td.bot{color:var(--ink); white-space:nowrap}
 
-/* The bar takes the width the numbers were not using anyway, capped so it
-   stays a bar rather than a rule across an ultrawide panel. */
+/* The bar column absorbs every pixel the numbers do not need, and the bar
+   fills it: a capped track just moves the dead space from the right of the
+   panel to the right of the bar. */
 #splitTable th,#splitTable td{white-space:nowrap}
-#splitTable th.barh,#splitTable td.barc{text-align:left; width:100%; padding-left:4px}
+#splitTable th.barh,#splitTable td.barc{text-align:left; width:100%; padding:6px 22px 6px 4px}
 #splitTable .bar{
-  display:block; height:9px; max-width:560px; border-radius:2px;
+  display:block; height:9px; border-radius:2px;
   background:var(--bg-raise); box-shadow:inset 0 0 0 1px var(--line);
 }
 #splitTable .bar i{display:block; height:100%; border-radius:2px; background:var(--dim)}
