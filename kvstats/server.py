@@ -236,6 +236,11 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                         "SELECT COUNT(*) FROM run WHERE fov IS NOT NULL AND fov < 10"),
                 })
 
+            # buckets comes from the curve table, not run: the run list marks
+            # runs with no per-second data, and roughly one run in seven has
+            # none. NULL (no curve row) is the marker, so it must be selected
+            # rather than inferred from perf_file, which is set before the
+            # .perf is parsed.
             if route == "/api/runs":
                 scenario = one("scenario")
                 try:
@@ -245,12 +250,14 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                 if scenario:
                     return self._json(_rows(
                         conn,
-                        "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key "
+                        "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
+                        "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets "
                         "FROM run WHERE scenario=? ORDER BY started_at DESC LIMIT ?",
                         (scenario, limit)))
                 return self._json(_rows(
                     conn,
-                    "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key "
+                    "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
+                    "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets "
                     "FROM run ORDER BY started_at DESC LIMIT ?", (limit,)))
 
             if route == "/api/scenarios":
