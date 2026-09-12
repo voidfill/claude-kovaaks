@@ -195,6 +195,26 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .u-select{background:color-mix(in oklab,var(--band) 12%,transparent)}
 .u-over{cursor:crosshair}
 
+/* ── split table ─────────────────────────────────────────── */
+#splitTable{border-collapse:collapse; width:100%; min-width:520px}
+#splitTable th,#splitTable td{
+  padding:6px 14px; text-align:right; border-bottom:1px solid var(--line);
+  font-family:var(--mono); font-size:12.5px;
+  font-variant-numeric:tabular-nums lining-nums;
+}
+#splitTable th{
+  font-weight:500; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--faint); border-bottom-color:var(--line-2);
+}
+#splitTable th:first-child,#splitTable td:first-child{text-align:left}
+#splitTable td.idx{color:var(--faint); white-space:nowrap}
+#splitTable td.bot{color:var(--dim)}
+#splitTable tbody tr:hover td{background:var(--bg-raise)}
+#splitTable tr.tot td{border-top:1px solid var(--line-2); color:var(--ink)}
+#splitTable tr.w td:first-child{box-shadow:inset 2px 0 0 var(--bad)}
+#splitTable .up{color:var(--bad)}
+#splitTable .dn{color:var(--good)}
+
 /* ── controls ────────────────────────────────────────────── */
 .controls{
   display:flex; align-items:center; gap:20px; flex-wrap:wrap;
@@ -265,6 +285,12 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .run[data-pb="1"]{border-left-color:var(--pb)}
 .run[data-pb="1"] .sc{color:var(--pb)}
 .run[data-nocurve="1"] .t::after{content:"·"; margin-left:4px; color:var(--ghost)}
+.run[data-shape="race"] .t::after,
+#scenTable tr[data-shape="race"] .name::after{
+  content:"race"; margin-left:6px; padding:1px 4px; border-radius:2px;
+  font-size:9px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--pb); border:1px solid color-mix(in oklab,var(--pb) 40%,var(--line-2));
+}
 .run[data-sign="up"] .d{color:var(--good)}
 .run[data-sign="down"] .d{color:var(--bad)}
 .run[aria-selected="true"]{background:var(--bg-raise); border-left-color:var(--ink)}

@@ -63,8 +63,18 @@ const axisBase = () => ({
   ticks: { stroke: alpha(C.line2, .8), width: 1, size: 4 }
 });
 
+// A race is indexed by share of the damage pool, a timed run by seconds.
+// Kill boundaries only line up on the former, which is why it exists.
+const xAxis = p => ({
+  ...axisBase(), size: 26,
+  values: (u, sp) => sp.map(v => p.axis.kind === 'progress'
+    ? Math.round(v * 100) + '%' : v + 's'),
+  incrs: p.axis.kind === 'progress'
+    ? [.05, .1, .2, .25, .5] : [5, 10, 15, 20, 30, 60]
+});
+
 function mkRate(el, data, p) {
-  const ratio = isRatio(p.metric);
+  const ratio = isRatio(p.rate.metric);
   const fmtY = v => v == null ? '' : ratio ? (v * 100).toFixed(0) + '%' : num(v, v < 10 ? 1 : 0);
   const opts = {
     width: el.clientWidth, height: el.clientHeight, padding: [10, 12, 0, 0],
@@ -76,7 +86,7 @@ function mkRate(el, data, p) {
       points: { size: 6, width: 1, stroke: () => C.bg, fill: (u, i) => u.series[i].stroke() }
     },
     axes: [
-      { ...axisBase(), size: 26, values: (u, sp) => sp.map(v => v + 's'), incrs: [5, 10, 15, 20, 30, 60] },
+      xAxis(p),
       { ...axisBase(), size: 48, values: (u, sp) => sp.map(fmtY) }
     ],
     series: [
@@ -89,7 +99,7 @@ function mkRate(el, data, p) {
     ],
     bands: [{ series: [2, 1], fill: alpha(C.band, .16) }],
     hooks: {
-      draw: [u => drawTail(u, p)],
+      draw: [u => { drawZero(u, p); drawKills(u, p); drawTail(u, p); }],
       setCursor: [u => readout(u, p)]
     }
   };
@@ -106,12 +116,12 @@ function mkDelta(el, data, p) {
       drag: { x: false, y: false }, points: { show: false }
     },
     axes: [
-      { ...axisBase(), size: 26, values: (u, sp) => sp.map(v => v + 's'), incrs: [5, 10, 15, 20, 30, 60] },
+      xAxis(p),
       { ...axisBase(), size: 48, values: (u, sp) => sp.map(v => (v > 0 ? '+' : '') + num(v, 0)) }
     ],
     series: [{}, { stroke: 'transparent', points: { show: false } }],
     hooks: {
-      draw: [u => { drawDelta(u); drawTail(u, p); }],
+      draw: [u => { drawDelta(u); drawKills(u, p); drawTail(u, p); }],
       setCursor: [u => readout(u, p)]
     }
   };
@@ -152,13 +162,57 @@ function drawDelta(u) {
   ctx.stroke(); ctx.restore();
 }
 
+/* Kill boundaries. For a race these are shared -- kill k sits at damage
+   k*pool/bots in every run -- so they are drawn solid and labelled. For a
+   timed run they belong to the focused run alone and are drawn subdued,
+   because two runs' kills genuinely do not coincide on a clock. */
+function drawKills(u, p) {
+  const marks = p.marks && p.marks.kills;
+  if (!marks || !marks.length) return;
+  const { top, height } = u.bbox;
+  const ctx = u.ctx;
+  ctx.save();
+  marks.forEach((at, i) => {
+    const x = u.valToPos(at, 'x', true);
+    ctx.setLineDash(p.marks.aligned ? [4, 3] : [2, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = alpha(p.marks.aligned ? C.pb : C.ghost, p.marks.aligned ? .5 : .45);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+    if (p.marks.aligned) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = C.faint;
+      ctx.font = '9.5px ' + css('--mono');
+      ctx.textAlign = 'right';
+      ctx.fillText('bot ' + (i + 1), x - 4, top + 11);
+    }
+  });
+  ctx.restore();
+}
+
+/* A second that lost points is a loss, not a small gain. Without a zero
+   reference a -4 bucket reads the same as a weak +4 one. The gross parts are
+   not recoverable -- KovaaK's writes +10 for a kill and -4 for a miss as a
+   single 5.6 -- so this shows net and the misses come from the metric picker. */
+function drawZero(u, p) {
+  if (!p.scenario.penalising) return;
+  const y0 = u.valToPos(0, 'y', true);
+  const { left, top, width, height } = u.bbox;
+  if (y0 < top || y0 > top + height) return;
+  const ctx = u.ctx;
+  ctx.save();
+  ctx.setLineDash([3, 4]); ctx.lineWidth = 1;
+  ctx.strokeStyle = alpha(C.dim, .6);
+  ctx.beginPath(); ctx.moveTo(left, y0); ctx.lineTo(left + width, y0); ctx.stroke();
+  ctx.restore();
+}
+
 /* region past compare_until — only one run still has data there.
    The server returns min(len(mine), len(base)): the FIRST index at which the
    two runs no longer overlap, so shading starts at it. When the lengths match
    that index sits one past the last plotted x and the edge guard drops it. */
 function drawTail(u, p) {
-  if (p.compare_until == null) return;
-  const x = u.valToPos(p.compare_until, 'x', true);
+  if (p.delta.compare_until == null) return;
+  const x = u.valToPos(p.delta.compare_until, 'x', true);
   const { left, top, width, height } = u.bbox;
   if (x >= left + width - 1) return;
   const ctx = u.ctx;
@@ -172,27 +226,28 @@ function drawTail(u, p) {
 
 function readout(u, p) {
   const i = u.cursor.idx;
-  const ratio = isRatio(p.metric);
+  const ratio = isRatio(p.rate.metric);
   const f = v => v == null ? '—' : ratio ? pct(v, 1) : num(v, 1);
   if (uRate && uRate.data[0]) {
     const d = uRate.data;
-    $('#lgRun').textContent = i == null ? f(p.curve ? p.curve.at(-1) : null) : f(d[5] && d[5][i]);
+    $('#lgRun').textContent = i == null ? f(p.rate.mine ? p.rate.mine.at(-1) : null) : f(d[5] && d[5][i]);
     $('#lgPb').textContent = i == null ? '—' : f(d[4] && d[4][i]);
     $('#lgBand').textContent = i == null ? '—' : f(d[3] && d[3][i]);
-    $('#lgT').textContent = i == null ? '' : i + 's';
+    $('#lgT').textContent = i == null ? '' : (p.axis.kind === 'progress' ? Math.round(d[0][i] * 100) + '%' : i + 's');
   }
-  const cd = p.cumulative_delta;
+  const cd = p.delta.values;
   if (cd) $('#lgDelta').textContent = signed(i == null ? cd.at(-1) : cd[clamp(i, 0, cd.length - 1)], 1);
 }
 
 function renderCharts(p) {
-  const hasCurve = !!(p.curve && p.curve.length);
+  const hasCurve = !!(p.rate.mine && p.rate.mine.length);
   $('#chartRate').hidden = !hasCurve;
   $('#rateEmpty').hidden = hasCurve;
   if (uRate) { uRate.destroy(); uRate = null; }
   if (uDelta) { uDelta.destroy(); uDelta = null; }
 
-  $('#rateUnit').textContent = METRICS.find(m => m[0] === p.metric)[1];
+  const m = METRICS.find(m => m[0] === p.rate.metric);
+  $('#rateUnit').textContent = m ? m[1] : p.rate.unit;
   $('#lgRecentN').textContent = p.baselines.recent_n;
 
   // "PB" overlay may be the best *charted* run instead of the true PB — say so.
@@ -214,19 +269,27 @@ function renderCharts(p) {
     return;
   }
 
-  const n = Math.max(p.curve.length, p.pb_curve ? p.pb_curve.length : 0, p.recent_band ? p.recent_band.mean.length : 0);
+  const n = Math.max(p.rate.mine.length, p.rate.pb ? p.rate.pb.length : 0, p.rate.band ? p.rate.band.mean.length : 0);
   const at = (arr, i) => arr && i < arr.length ? arr[i] : null;
-  const xs = Array.from({ length: n }, (_, i) => i);
-  const col = arr => xs.map(i => at(arr, i));
-  const data = [xs, col(p.recent_band && p.recent_band.lo), col(p.recent_band && p.recent_band.hi),
-                col(p.recent_band && p.recent_band.mean), col(p.pb_curve), col(p.curve)];
+  const idx = Array.from({ length: n }, (_, i) => i);
+  const col = arr => idx.map(i => at(arr, i));
+  // A race is indexed by share of the damage pool, a timed run by seconds.
+  // Kill boundaries only line up on the former, which is why it exists.
+  const xs = p.axis.kind === 'progress' ? idx.map(i => (i + 0.5) / n) : idx;
+  const data = [xs, col(p.rate.band && p.rate.band.lo), col(p.rate.band && p.rate.band.hi),
+                col(p.rate.band && p.rate.band.mean), col(p.rate.pb), col(p.rate.mine)];
   uRate = mkRate($('#chartRate'), data, p);
 
-  const hasDelta = !!(p.cumulative_delta && p.cumulative_delta.length);
+  const hasDelta = !!(p.delta.values && p.delta.values.length);
   $('#chartDelta').hidden = !hasDelta; $('#deltaEmpty').hidden = hasDelta;
   if (hasDelta) {
-    const dx = Array.from({ length: p.cumulative_delta.length }, (_, i) => i);
-    uDelta = mkDelta($('#chartDelta'), [dx, p.cumulative_delta], p);
+    // A rate point is a cell at (i+0.5)/n; a delta point is a grid boundary --
+    // delta.values[i] is the gap accumulated by progress (i+1)/n -- so the two
+    // charts' x series differ by half a step even though both are 0..1.
+    const dn = p.delta.values.length;
+    const dx = p.axis.kind === 'progress'
+      ? Array.from({ length: dn }, (_, i) => (i + 1) / dn) : Array.from({ length: dn }, (_, i) => i);
+    uDelta = mkDelta($('#chartDelta'), [dx, p.delta.values], p);
   } else {
     $('#lgDelta').textContent = '—';
     $('#deltaEmpty').innerHTML = `<strong>no baseline curve</strong><span>${p.baselines.candidates ? 'No earlier run of this scenario has per-second data to compare against.' : 'First run of this scenario — nothing to compare against yet.'}</span>`;
@@ -240,6 +303,27 @@ const ro = new ResizeObserver(() => {
 });
 ro.observe($('#chartRate')); ro.observe($('#chartDelta'));
 
+/* ═══════════════════════════ SPLITS ═══════════════════════ */
+function renderSplits(p) {
+  const panel = $('#splitPanel');
+  panel.hidden = !(p.splits && p.splits.length);
+  if (panel.hidden) return;
+  const worst = p.splits.filter(s => s.idx != null && s.delta > 0)
+    .sort((a, b) => b.delta - a.delta).slice(0, 2).map(s => s.idx);
+  const cell = v => v == null ? '—'
+    : `<span class="${v > 0 ? 'up' : v < 0 ? 'dn' : ''}">${signed(v, 2)}</span>`;
+  const total = p.splits.reduce((a, s) => a + s.mine, 0);
+  $('#splitSub').textContent = `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`;
+  $('#splitTable').innerHTML =
+    `<thead><tr><th></th><th>bot</th><th>this run</th><th>PB</th><th>Δ s</th></tr></thead><tbody>` +
+    p.splits.map(s => `<tr class="${worst.includes(s.idx) ? 'w' : ''}">
+      <td class="idx">${s.idx == null ? '' : 'bot ' + s.idx}</td>
+      <td class="bot">${s.bot}</td><td>${num(s.mine, 2)}</td>
+      <td>${num(s.base, 2)}</td><td>${cell(s.delta)}</td></tr>`).join('') +
+    `<tr class="tot"><td class="idx"></td><td class="bot">total elapsed</td>
+       <td>${num(total, 2)}</td><td>—</td><td>—</td></tr></tbody>`;
+}
+
 /* ═══════════════════════════ HEADLINE ═════════════════════ */
 function renderHeadline(p, isNew) {
   const r = p.run, hl = $('#headline');
@@ -249,7 +333,7 @@ function renderHeadline(p, isNew) {
   $('#hlCfg').textContent = `${num(r.cm360, 1)} cm/360 · ${r.fov}° · ${r.dpi} dpi`;
   $('#hlScore').textContent = num(r.score, 1);
 
-  const base = p.delta_baseline;
+  const base = p.delta.baseline;
   const d = $('#hlDelta');
   if (base) {
     const diff = r.score - base.score;
@@ -271,7 +355,19 @@ function renderHeadline(p, isNew) {
   }
 
   const rm = p.baselines.recent_mean_score;
-  const cells = [
+  // spm is meaningless on a race (score is a countdown) and kills is a
+  // constant, so both slots carry something that varies instead.
+  const isRace = p.scenario.shape === 'race';
+  const cells = isRace ? [
+    ['acc', pct(r.accuracy, 1)],
+    ['elapsed', num(r.elapsed_s, 2) + '<small> s</small>'],
+    ['dmg/s', num(p.scenario.pool / r.elapsed_s, 1)],
+    ['avg per bot', num(r.avg_ttk, 2) + '<small> s</small>'],
+    ['hits', `${num(r.hits, 0)}<small> / ${num(r.shots, 0)}</small>`],
+    ['recent mean', rm ? num(rm, 0) : '—'],
+    ['vs recent', rm ? signed((r.score - rm) / rm * 100, 1) + '<small>%</small>' : '—'],
+    ['fps', num(r.avg_fps, 0)]
+  ] : [
     ['acc', pct(r.accuracy, 1)],
     ['spm', num(r.spm, 0)],
     ['kills', num(r.kills, 0)],
@@ -281,6 +377,14 @@ function renderHeadline(p, isNew) {
     ['vs recent', rm ? signed((r.score - rm) / rm * 100, 1) + '<small>%</small>' : '—'],
     ['fps', num(r.avg_fps, 0)]
   ];
+
+  // Overshots, reloads and damage taken are recorded on every run but have
+  // never been shown. They are only meaningful where they are non-zero -- 74
+  // scenarios overshoot, 18 reload, 4 take return fire -- so they appear only
+  // on the runs that have them rather than padding every headline with zeroes.
+  if (r.overshots) cells.push(['overshots', num(r.overshots, 0)]);
+  if (r.reloads) cells.push(['reloads', num(r.reloads, 0)]);
+  if (r.damage_taken) cells.push(['dmg taken', num(r.damage_taken, 0)]);
   $('#hlStats').innerHTML = cells.map(([k, v]) => `<div class="cell"><dt>${k}</dt><dd class="num">${v}</dd></div>`).join('');
 
   if (isNew) { hl.classList.remove('flash'); void hl.offsetWidth; hl.classList.add('flash'); setTimeout(() => hl.classList.remove('flash'), 950); }
@@ -318,7 +422,8 @@ function renderRunList(newId) {
     return `<li class="run" role="option" data-id="${r.id}" data-i="${i}"
       aria-selected="${r.id === A.focusedId}"
       data-same="${focused && r.scenario === focused.scenario ? 1 : 0}"
-      data-pb="${m.pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}">
+      data-pb="${m.pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
+      data-shape="${r.shape || 'timed'}">
       <span class="t">${hhmm(r.started_at)}</span>
       <span class="name">${r.scenario}</span>
       <span class="right"><span class="sc">${num(r.score, 1)}</span>
@@ -379,12 +484,20 @@ async function renderScenarios() {
   const val = v => Array.isArray(v) ? v.at(-1) : v;
   $('#scenTable').innerHTML = `<thead><tr><th>Scenario</th><th>Runs</th><th>PB</th><th>Recent form</th><th>% of PB</th><th></th><th>Last played</th></tr></thead><tbody>` +
     list.map(s => {
+      // Race scores sit in a 906-919 band out of 1000, so every race scenario
+      // pins at ~99% of PB and the bar dies. Time is the honest measure there.
+      const isRace = s.shape === 'race';
+      const rel = isRace
+        ? (s.recent_elapsed && s.pb_elapsed ? s.pb_elapsed / s.recent_elapsed : null)
+        : (val(s.recent_form) != null && s.pb ? val(s.recent_form) / s.pb : null);
       const form = val(s.recent_form);
-      const rel = form != null && s.pb ? form / s.pb : null;
       const w = rel == null ? 0 : clamp((rel - .7) / .3, .02, 1) * 100;   // 70–100 % of PB spread across the bar
-      return `<tr data-scenario="${s.scenario}"><td class="name">${s.scenario}</td><td class="n">${s.runs}</td>
+      // % of PB means "pb time / recent time" for a race, same column and same
+      // bar as the timed "recent / pb" -- both read "higher is closer to PB".
+      const relTitle = isRace ? ' title="PB time / recent time · 100% is PB pace"' : '';
+      return `<tr data-scenario="${s.scenario}" data-shape="${s.shape || 'timed'}"><td class="name">${s.scenario}</td><td class="n">${s.runs}</td>
         <td class="n pb">${num(s.pb, 1)}</td><td class="n">${form == null ? '—' : num(form, 1)}</td>
-        <td class="n">${rel == null ? '—' : (rel * 100).toFixed(1) + '%'}</td>
+        <td class="n"${relTitle}>${rel == null ? '—' : (rel * 100).toFixed(1) + '%'}</td>
         <td><div class="formbar"><i style="width:${w}%"></i></div></td>
         <td class="n">${s.last_played ? hhmm(s.last_played) : '—'}</td></tr>`;
     }).join('') + '</tbody>';
@@ -395,9 +508,15 @@ async function loadRun(id, isNew) {
   const c = A.ctrl;
   const p = await api(`/api/run/${id}?metric=${c.metric}&smoothing=${c.smoothing}&recent_n=${c.recent_n}&same_cfg=${c.same_cfg ? 1 : 0}`);
   if (!p) return;
+  if (p.metrics && !p.metrics.includes(A.ctrl.metric)) {
+    A.ctrl.metric = 'score';
+    return loadRun(id, isNew);   // one re-fetch, then render
+  }
   A.payload = p; A.focusedId = id;
+  buildSegs();
   renderHeadline(p, isNew);
   renderCharts(p);
+  renderSplits(p);
   renderRunList(isNew ? id : null);
 }
 
@@ -436,6 +555,7 @@ async function refresh(isNew) {
       $('#rateEmpty').innerHTML = `<strong>${h.awaiting_perf ? 'indexing' : 'no runs yet'}</strong><span>${h.awaiting_perf ? 'Reading the history in your stats folder. The first chart appears as soon as a run with per-second data is parsed.' : 'The next run you finish lands here about a second after it ends.'}</span>`;
       $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
       $('#deltaEmpty').innerHTML = '<span>—</span>';
+      $('#splitPanel').hidden = true;
       renderRunList();
       return;
     }
@@ -449,7 +569,8 @@ async function refresh(isNew) {
 
 /* ═══════════════════════════ CONTROLS ═════════════════════ */
 function buildSegs() {
-  $('#ctlMetric').innerHTML = METRICS.map(([k, l]) =>
+  const usable = (A.payload && A.payload.metrics) || METRICS.map(m => m[0]);
+  $('#ctlMetric').innerHTML = METRICS.filter(([k]) => usable.includes(k)).map(([k, l]) =>
     `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.metric === k}">${k}</button>`).join('');
   $('#ctlSmooth').innerHTML = SMOOTH.map(([k, l]) =>
     `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.smoothing === k}">${l}</button>`).join('');
