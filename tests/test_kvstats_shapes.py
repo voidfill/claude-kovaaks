@@ -87,3 +87,38 @@ class Penalising(unittest.TestCase):
     def test_a_negative_bucket_is_a_penalty(self):
         self.assertTrue(shapes.is_penalising(PENALISING_CURVE))
         self.assertFalse(shapes.is_penalising(TIMED_CURVE))
+
+
+class FixedWindows(unittest.TestCase):
+    """Real TTKs. The VT slots come from 42 runs of VT Aether Intermediate S5,
+    the kill slots from 26 runs of Air Pure Medium -- the two groups are 800x
+    apart on relative spread, which is the whole basis of the rule.
+    """
+
+    WINDOWS = {1: [18.991, 18.991, 18.990, 18.991],
+               2: [20.395, 20.394, 20.395, 20.394],
+               3: [20.394, 20.395, 20.394, 20.394]}
+    KILLS = {1: [8.94, 11.20, 7.31, 13.60],
+             2: [15.02, 12.88, 17.44, 11.09],
+             3: [9.77, 8.13, 12.30, 10.44]}
+
+    def test_fixed_windows_report_their_bot_count(self):
+        self.assertEqual(shapes.fixed_windows(self.WINDOWS), 3)
+
+    def test_real_kills_are_not_windows(self):
+        self.assertIsNone(shapes.fixed_windows(self.KILLS))
+
+    def test_one_run_is_not_evidence(self):
+        """A single run's TTK has no spread at all, which would pass the
+        threshold while showing nothing about whether the scenario fixed it."""
+        self.assertIsNone(shapes.fixed_windows({1: [18.991], 2: [20.395]}))
+
+    def test_a_slot_too_thin_to_judge_is_skipped_not_fatal(self):
+        """A run quit part-way leaves a later slot with one sample. That must
+        not cost the scenario its classification."""
+        thin = dict(self.WINDOWS)
+        thin[4] = [7.5]
+        self.assertEqual(shapes.fixed_windows(thin), 3)
+
+    def test_no_kill_rows_at_all(self):
+        self.assertIsNone(shapes.fixed_windows({}))

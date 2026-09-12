@@ -247,8 +247,13 @@ function drawKills(u, p) {
   const { top, height } = u.bbox;
   const ctx = u.ctx;
   ctx.save();
+  // A window's closing boundary can sit past the last plotted second -- the
+  // clock runs to 59.8 while the curve has 60 buckets numbered 0..59 -- and an
+  // unclamped rule takes its label outside the plot, where the canvas cuts it
+  // off mid-name. Clamped, the last bot still gets its rule and its full name.
+  const xmax = u.scales.x.max;
   marks.forEach((at, i) => {
-    const x = u.valToPos(at, 'x', true);
+    const x = u.valToPos(Math.min(at, xmax), 'x', true);
     ctx.setLineDash(p.marks.aligned ? [4, 3] : [2, 4]);
     ctx.lineWidth = 1;
     ctx.strokeStyle = alpha(p.marks.aligned ? C.pb : C.ghost, p.marks.aligned ? .5 : .45);
@@ -393,6 +398,7 @@ function renderSplits(p) {
   const panel = $('#splitPanel');
   panel.hidden = !(p.splits && p.splits.length);
   if (panel.hidden) return;
+  $('#splitTitle').textContent = 'Splits';
   // Marked off the run-relative delta, not the raw one: the raw delta ranks
   // the bots you find hard, which are the same bots every run and so tell you
   // nothing about this one.
@@ -440,6 +446,51 @@ function renderSplits(p) {
       <td>${num(s.mine, 2)}</td><td>${num(s.base, 2)}</td>
       <td>${cell(s.delta)}</td><td>${cell(s.delta_adj)}</td></tr>`).join('') +
     `</tbody>`;
+}
+
+/* A rotation of bots that never die, each holding the clock for a fixed
+   stretch. The window sets how much damage was on offer, so what varies is the
+   share of it taken -- the one number that reads the same on a scenario
+   offering 0.009 a window and one offering 0.86. */
+function renderWindows(p) {
+  const panel = $('#splitPanel'), rows = p.windows;
+  panel.hidden = false;
+  $('#splitTitle').textContent = 'Bots';
+
+  // Green is the good direction, which is up here and down in the split table
+  // above: there a delta is seconds spent, here it is damage taken.
+  const cell = v => v == null ? '—'
+    : `<span class="${v > 0 ? 'dn' : v < 0 ? 'up' : ''}">${signed(v * 100, 1)}</span>`;
+  const shown = rows.filter(r => r.mine != null);
+  const mean = shown.length ? shown.reduce((a, r) => a + r.mine, 0) / shown.length : null;
+  const pb = rows.filter(r => r.base != null);
+  $('#splitSub').textContent = [
+    `${rows.length} bots`,
+    rows.every(r => r.window_s) ? `${num(rows[0].window_s, 1)}–${num(rows.at(-1).window_s, 1)} s windows` : '',
+    mean == null ? '' : `${pct(mean, 1)} of possible`,
+    pb.length ? `PB ${pct(pb.reduce((a, r) => a + r.base, 0) / pb.length, 1)}` : ''
+  ].filter(Boolean).join('  ·  ');
+
+  // The bots you actually lost against the PB on, at most two, for the same
+  // reason the split table marks its worst: a list of five ranks nothing.
+  const worst = rows.filter(r => r.delta != null && r.delta < 0)
+    .sort((a, b) => a.delta - b.delta).slice(0, 2).map(r => r.idx);
+
+  $('#splitTable').innerHTML =
+    `<thead><tr><th>bot</th><th class="barh">share of window</th><th>this run</th>
+       <th>PB</th><th>Δ PB</th><th>recent</th><th>Δ recent</th></tr></thead><tbody>` +
+    rows.map(r => {
+      const tint = r.delta == null ? '' : r.delta > 0 ? ' dn' : r.delta < 0 ? ' up' : '';
+      const width = r.mine == null ? 0 : clamp(r.mine, 0, 1) * 100;
+      return `<tr class="${worst.includes(r.idx) ? 'w' : ''}">
+        <td class="bot">${r.bot}</td>
+        <td class="barc"><span class="bar${tint}"><i style="width:${width.toFixed(2)}%"></i></span></td>
+        <td>${r.mine == null ? '—' : pct(r.mine, 1)}</td>
+        <td>${r.base == null ? '—' : pct(r.base, 1)}</td>
+        <td>${cell(r.delta)}</td>
+        <td>${r.recent == null ? '—' : pct(r.recent, 1)}</td>
+        <td>${cell(r.delta_recent)}</td></tr>`;
+    }).join('') + `</tbody>`;
 }
 
 /* ═══════════════════════════ HEADLINE ═════════════════════ */
@@ -643,7 +694,7 @@ async function loadRun(id, isNew) {
   buildSegs();
   renderHeadline(p, isNew);
   renderCharts(p);
-  renderSplits(p);
+  p.windows && p.windows.length ? renderWindows(p) : renderSplits(p);
   renderRunList(isNew ? id : null);
 }
 

@@ -14,7 +14,7 @@ from . import perf as perfmod
 from . import shapes
 from . import statscsv
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_TRIES = 5
 
 SCHEMA = """
@@ -59,6 +59,7 @@ CREATE TABLE scenario (
   shape      TEXT NOT NULL DEFAULT 'timed',
   penalising INTEGER NOT NULL DEFAULT 0,
   budget     REAL, pool REAL, bots INTEGER, clock_s REAL,
+  windowed   INTEGER NOT NULL DEFAULT 0,
   evidence   TEXT
 );
 
@@ -277,7 +278,7 @@ def refresh_scenario(conn, name, commit=True):
         return max(usable) if usable else None
 
     pool = bots = clock_s = None
-    penalising = 0
+    penalising = windowed = 0
     if verdict["shape"] == shapes.RACE:
         # Hits are the damage pool: every hit is one damage in these scenarios,
         # and the total is identical in every run that ran to the end.
@@ -295,18 +296,30 @@ def refresh_scenario(conn, name, commit=True):
         # A countdown is negative every bucket by construction; that is the
         # clock, not a penalty, so this is only asked of timed scenarios.
         penalising = int(any(shapes.is_penalising(c) for c in curves))
+        # Some fixed-clock scenarios spend that clock on a rotation of bots
+        # that never die. One grouped query rather than load_kills per run:
+        # this runs on every new run, not just at bootstrap.
+        by_slot = {}
+        for row in conn.execute(
+                "SELECT k.idx AS idx, k.ttk AS ttk FROM kill k "
+                "JOIN run r ON r.id = k.run_id WHERE r.scenario=?", (name,)):
+            by_slot.setdefault(row["idx"], []).append(row["ttk"])
+        slots = shapes.fixed_windows(by_slot)
+        if slots:
+            bots, windowed = slots, 1
 
     conn.execute(
         "INSERT OR REPLACE INTO scenario"
-        "(name, shape, penalising, budget, pool, bots, clock_s, evidence) "
-        "VALUES(?,?,?,?,?,?,?,?)",
+        "(name, shape, penalising, budget, pool, bots, clock_s, windowed, evidence) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
         (name, verdict["shape"], penalising, verdict["budget"],
-         pool, bots, clock_s, verdict["evidence"]))
+         pool, bots, clock_s, windowed, verdict["evidence"]))
     if commit:
         conn.commit()
     return {"shape": verdict["shape"], "penalising": penalising,
             "budget": verdict["budget"], "pool": pool, "bots": bots,
-            "clock_s": clock_s, "evidence": verdict["evidence"]}
+            "clock_s": clock_s, "windowed": windowed,
+            "evidence": verdict["evidence"]}
 
 
 def bootstrap(conn, cfg):

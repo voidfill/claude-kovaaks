@@ -107,7 +107,7 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
     scenario = ({key: scen_row[key] for key in scen_row.keys()} if scen_row else
                 {"name": run["scenario"], "shape": shapes.TIMED, "penalising": 0,
                  "budget": None, "pool": None, "bots": None, "clock_s": None,
-                 "evidence": "default"})
+                 "windowed": 0, "evidence": "default"})
     is_race = scenario["shape"] == shapes.RACE
 
     curve = index.load_curve(conn, run_id)
@@ -131,6 +131,7 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
                   "compare_until": None, "baseline": None},
         "marks": {"kills": [], "labels": [], "aligned": False},
         "splits": [],
+        "windows": [],
         "baselines": {
             "true_pb": base["true_pb"],
             "candidates": base["candidates"],
@@ -146,15 +147,24 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
     if is_race:
         _fill_race(conn, payload, run, scenario, curve, base, smoothing)
     else:
-        _fill_timed(conn, payload, run, curve, base, metric, smoothing)
+        _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing)
     return payload
 
 
-def _fill_timed(conn, payload, run, curve, base, metric, smoothing):
-    """The existing behaviour, unchanged: native per-second grid, score units."""
+def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing):
+    """Native per-second grid, score units -- plus bot windows where the
+    scenario spends its clock on a rotation of bots that never die."""
     mine = _series(curve, metric) if curve else []
     payload["rate"]["mine"] = compare.smooth(mine, smoothing)
-    payload["marks"]["kills"] = [k["t"] for k in index.load_kills(conn, run["id"])]
+    kills = index.load_kills(conn, run["id"])
+    payload["marks"]["kills"] = [k["t"] for k in kills]
+    # A window boundary is the scenario's, not the player's, so it falls at the
+    # same second in every run. That is what `aligned` means to the chart: draw
+    # them as shared, named boundaries rather than this run's private events.
+    if scenario["windowed"]:
+        payload["marks"]["aligned"] = True
+        payload["marks"]["labels"] = [k["bot"] for k in kills]
+        payload["windows"] = _bot_windows(conn, run, base)
 
     if curve and base["pb"] and base["pb"]["curve"]:
         pb_curve = base["pb"]["curve"]
@@ -289,6 +299,56 @@ def _race_splits(conn, run, base):
     rows.append({"idx": None, "bot": "dead time", "mine": mine_dead,
                  "base": base_dead, "delta_adj": None,
                  "delta": (mine_dead - base_dead) if base_dead is not None else None})
+    return rows
+
+
+def _bot_windows(conn, run, base):
+    """Per-bot share of the damage its window made available.
+
+    Raw damage is unreadable across scenarios -- 0.009 a window on Plink Palace
+    against 0.86 on Aether -- and the window is a fixed length, so the damage it
+    offers is a constant. The share of it you took is the same number in every
+    scenario, and it is what the window was for.
+    """
+    kills = index.load_kills(conn, run["id"])
+    if not kills:
+        return []
+
+    def share(kill):
+        possible = kill["dmg_possible"]
+        return None if not possible else kill["dmg_done"] / possible
+
+    base_by_idx = {}
+    if base["pb"]:
+        base_by_idx = {k["idx"]: k
+                       for k in index.load_kills(conn, base["pb"]["run_id"])}
+
+    # The same recent-N the chart's band is built from, so the stepper moves
+    # both and the two cannot disagree about what "recent" means.
+    recent_by_idx = {}
+    recent_ids = base["recent"]["run_ids"] or []
+    if recent_ids:
+        holes = ",".join("?" * len(recent_ids))
+        for row in conn.execute(
+                "SELECT idx, dmg_done, dmg_possible FROM kill "
+                f"WHERE run_id IN ({holes})", list(recent_ids)):
+            value = share(row)
+            if value is not None:
+                recent_by_idx.setdefault(row["idx"], []).append(value)
+
+    rows = []
+    for kill in kills:
+        mine = share(kill)
+        other = base_by_idx.get(kill["idx"])
+        against = share(other) if other else None
+        pool = recent_by_idx.get(kill["idx"]) or []
+        recent = sum(pool) / len(pool) if pool else None
+        rows.append({
+            "idx": kill["idx"], "bot": kill["bot"], "window_s": kill["ttk"],
+            "mine": mine, "base": against, "recent": recent,
+            "delta": None if mine is None or against is None else mine - against,
+            "delta_recent": None if mine is None or recent is None else mine - recent,
+        })
     return rows
 
 

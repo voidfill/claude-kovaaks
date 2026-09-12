@@ -9,6 +9,8 @@ Everything here is pure over already-parsed values -- no database, no file IO.
 The index calls it with rows it already holds; the tests call it with literals.
 """
 
+import statistics
+
 RACE = "race"
 TIMED = "timed"
 
@@ -21,6 +23,15 @@ COUNTDOWN_TOLERANCE = 0.01
 
 BUDGET_TOLERANCE = 0.1
 MIN_DURATION_SPREAD = 1.0
+
+# A bot whose window the scenario fixes writes the same TTK every run; a bot
+# you actually kill writes how long it took you. Measured over the reference
+# install, the two do not come close to touching: the widest relative spread
+# among fixed-window slots is 0.0001, the tightest among real kills is 0.081.
+# This sits in the empty 800x between them, so it is a threshold in name only.
+WINDOW_MAX_SPREAD = 0.02
+# One run cannot show a TTK is fixed rather than merely what happened once.
+WINDOW_MIN_RUNS = 2
 
 
 def countdown_budget(score_series):
@@ -61,6 +72,30 @@ def budget_from_totals(pairs):
     if max(elapsed) - min(elapsed) < MIN_DURATION_SPREAD:
         return None
     return sum(budgets) / len(budgets)
+
+
+def fixed_windows(ttk_by_slot):
+    """The bot count if every slot's length is fixed by the scenario, else None.
+
+    `ttk_by_slot` maps a kill's index to that slot's TTK across every run of
+    the scenario. Invincible bots never die: KovaaK's still writes one kill row
+    per bot, but the TTK is the window the scenario gave it, identical run to
+    run. Slots too thin to judge are skipped rather than failing the scenario,
+    since a run quit part-way leaves later slots with one sample.
+    """
+    slots = {idx: [t for t in values if t]
+             for idx, values in ttk_by_slot.items()}
+    slots = {idx: values for idx, values in slots.items()
+             if len(values) >= WINDOW_MIN_RUNS}
+    if not slots:
+        return None
+    for values in slots.values():
+        mean = sum(values) / len(values)
+        if mean <= 0:
+            return None
+        if statistics.pstdev(values) / mean > WINDOW_MAX_SPREAD:
+            return None
+    return max(slots)
 
 
 def is_penalising(score_series):
