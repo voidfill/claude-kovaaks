@@ -311,6 +311,17 @@ elapsed_pb`. Air Pure Medium then reads 114 % of PB time instead of 98.8 % of PB
 Add a small shape badge on race rows so the different chart is not a surprise; change
 nothing else.
 
+**Metric availability.** The payload carries `metrics`, the list of metric buttons this run
+can actually support, and the UI offers only those. `efficiency` is withheld where
+`sum(dmg_possible) < 0.5 * sum(shots)` — the signature of a scenario that books damage only
+at kill time, where the per-second ratio is a flat zero rather than a measurement. This is
+decided per run from the curve, not hardcoded per scenario.
+
+**The unsurfaced counters.** `overshots`, `reloads` and `damage_taken` are recorded on every
+run and shown on none. They join the headline grid, but only on runs where they are
+non-zero (74 scenarios overshoot, 18 reload, 4 take return fire) — padding every headline
+with three zeroes would cost more than it tells.
+
 ## Implementation order
 
 1. `statscsv.py` — parse the per-kill table; add `elapsed_s`, `overshots`, `reloads`,
