@@ -1,189 +1,560 @@
-"use strict";
+/* kvstats — app.js
+   Plain ES2020, no build step. Talks to the Python server on the same origin. */
+(() => {
+'use strict';
 
-const $ = (id) => document.getElementById(id);
-const state = { runId: null, rate: null, delta: null };
+const API = '';                    // same origin
 
-const opts = () => new URLSearchParams({
-  metric: $("metric").value,
-  smoothing: $("smoothing").value,
-  recent_n: $("recent").value,
-  same_cfg: $("samecfg").checked ? "1" : "0",
+/* ── helpers ─────────────────────────────────────────────── */
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const pad2 = n => String(n).padStart(2, '0');
+const num = (v, d = 1) => v == null || !isFinite(v) ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = (v, d = 1) => v == null ? '—' : (v * 100).toFixed(d) + '%';
+const signed = (v, d = 1) => (v > 0 ? '+' : v < 0 ? '−' : '') + num(Math.abs(v), d);
+const hhmm = iso => { const t = new Date(iso); return pad2(t.getHours()) + ':' + pad2(t.getMinutes()); };
+const hhmmss = iso => hhmm(iso) + ':' + pad2(new Date(iso).getSeconds());
+
+const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+let C = {};
+const readColors = () => {
+  C = { ink: css('--ink'), dim: css('--dim'), faint: css('--faint'), ghost: css('--ghost'),
+        line: css('--line'), line2: css('--line-2'), good: css('--good'), bad: css('--bad'),
+        pb: css('--pb'), band: css('--band'), bg: css('--bg-panel') };
+};
+const alpha = (hex, a) => {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+
+const METRICS = [
+  ['score', 'score / s'], ['shots', 'shots / s'], ['hits', 'hits / s'],
+  ['kills', 'kills / s'], ['accuracy', 'accuracy'], ['efficiency', 'efficiency']
+];
+// 0 and 1 both mean "no smoothing" to the server (compare.smooth returns the
+// series unchanged for window <= 1), so "raw" is sent as 0.
+const SMOOTH = [[0, 'raw'], [3, '3 s'], [5, '5 s']];
+const isRatio = m => m === 'accuracy' || m === 'efficiency';
+
+/* ── app state ───────────────────────────────────────────── */
+const A = {
+  view: 'run',
+  ctrl: { metric: 'score', smoothing: 0, recent_n: 10, same_cfg: true },
+  runs: [], payload: null, focusedId: null, kbd: -1,
+  filterScenario: null, health: null
+};
+
+/* ── fetch layer ─────────────────────────────────────────── */
+async function api(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+/* ═══════════════════════════ CHARTS ═══════════════════════ */
+let uRate = null, uDelta = null;
+const SYNC = uPlot.sync('kv');
+
+const axisBase = () => ({
+  stroke: C.faint, font: '11px ' + css('--mono'),
+  grid: { stroke: alpha(C.line2, .55), width: 1 },
+  ticks: { stroke: alpha(C.line2, .8), width: 1, size: 4 }
 });
 
-function destroy(chart) { if (chart) chart.destroy(); return null; }
-
-function axes() {
-  return [
-    { stroke: "#8b93a1", grid: { stroke: "#232830" } },
-    { stroke: "#8b93a1", grid: { stroke: "#232830" } },
-  ];
+function mkRate(el, data, p) {
+  const ratio = isRatio(p.metric);
+  const fmtY = v => v == null ? '' : ratio ? (v * 100).toFixed(0) + '%' : num(v, v < 10 ? 1 : 0);
+  const opts = {
+    width: el.clientWidth, height: el.clientHeight, padding: [10, 12, 0, 0],
+    scales: { x: { time: false } },
+    legend: { show: false },
+    cursor: {
+      sync: { key: SYNC.key, scales: ['x', null], setSeries: false },
+      drag: { x: false, y: false },
+      points: { size: 6, width: 1, stroke: () => C.bg, fill: (u, i) => u.series[i].stroke() }
+    },
+    axes: [
+      { ...axisBase(), size: 26, values: (u, sp) => sp.map(v => v + 's'), incrs: [5, 10, 15, 20, 30, 60] },
+      { ...axisBase(), size: 48, values: (u, sp) => sp.map(fmtY) }
+    ],
+    series: [
+      {},
+      { stroke: 'transparent', points: { show: false } },                                            // 1 lo
+      { stroke: 'transparent', points: { show: false } },                                            // 2 hi
+      { stroke: alpha(C.band, .85), width: 1, dash: [2, 4], points: { show: false } },               // 3 mean
+      { stroke: C.pb, width: 1.5, dash: [6, 4], points: { show: false } },                           // 4 pb
+      { stroke: C.ink, width: 2.25, points: { show: false } }                                        // 5 run
+    ],
+    bands: [{ series: [2, 1], fill: alpha(C.band, .16) }],
+    hooks: {
+      draw: [u => drawTail(u, p)],
+      setCursor: [u => readout(u, p)]
+    }
+  };
+  return new uPlot(opts, data, el);
 }
 
-// Baselines are not always the same length as the focused run -- about 6% of
-// real runs differ. slice() alone would truncate a longer baseline and leave a
-// shorter one short, which uPlot renders as a silently missing tail. Pad with
-// null, which is uPlot's own gap value.
-function fit(values, n) {
-  const out = values.slice(0, n);
-  while (out.length < n) out.push(null);
-  return out;
+function mkDelta(el, data, p) {
+  const opts = {
+    width: el.clientWidth, height: el.clientHeight, padding: [8, 12, 0, 0],
+    scales: { x: { time: false } },
+    legend: { show: false },
+    cursor: {
+      sync: { key: SYNC.key, scales: ['x', null], setSeries: false },
+      drag: { x: false, y: false }, points: { show: false }
+    },
+    axes: [
+      { ...axisBase(), size: 26, values: (u, sp) => sp.map(v => v + 's'), incrs: [5, 10, 15, 20, 30, 60] },
+      { ...axisBase(), size: 48, values: (u, sp) => sp.map(v => (v > 0 ? '+' : '') + num(v, 0)) }
+    ],
+    series: [{}, { stroke: 'transparent', points: { show: false } }],
+    hooks: {
+      draw: [u => { drawDelta(u); drawTail(u, p); }],
+      setCursor: [u => readout(u, p)]
+    }
+  };
+  return new uPlot(opts, data, el);
 }
 
-function drawRate(payload) {
-  const n = payload.curve.length;
-  const t = Array.from({ length: n }, (_, i) => i);
-  const series = [{}, { label: "this run", stroke: "#e6e8ec", width: 2 }];
-  const data = [t, payload.curve];
-  const bands = [];
+/* filled-to-zero cumulative delta, green above / red below, drawn by hand
+   so the sign split is exact and stays readable at glance distance */
+function drawDelta(u) {
+  const ctx = u.ctx, d = u.data[1], xs = u.data[0];
+  if (!d || d.length < 2) return;
+  const { left, top, width, height } = u.bbox;
+  const y0 = u.valToPos(0, 'y', true);
+  const px = i => u.valToPos(xs[i], 'x', true);
+  const py = i => u.valToPos(d[i], 'y', true);
 
-  if (payload.recent_band) {
-    // uPlot's band is drawn between two series by index. Fit lo/hi exactly
-    // like mean, or the fill misaligns against the focused run on the ~6% of
-    // runs whose baseline curves are a different length. The bound series
-    // themselves are undrawn (width 0) and hidden from the legend via the
-    // "u-band-bound" class -- only the fill and the mean line are visible.
-    const hiIdx = series.length;
-    series.push({ label: "recent +1σ", class: "u-band-bound", stroke: "transparent", width: 0 });
-    data.push(fit(payload.recent_band.hi, n));
-    const loIdx = series.length;
-    series.push({ label: "recent -1σ", class: "u-band-bound", stroke: "transparent", width: 0 });
-    data.push(fit(payload.recent_band.lo, n));
-    bands.push({ series: [hiIdx, loIdx], fill: "rgba(59,130,246,.15)" });
+  const area = new Path2D();
+  area.moveTo(px(0), y0);
+  for (let i = 0; i < d.length; i++) area.lineTo(px(i), py(i));
+  area.lineTo(px(d.length - 1), y0);
+  area.closePath();
 
-    series.push({ label: "recent mean", stroke: "#3b82f6", width: 1, dash: [2, 3] });
-    data.push(fit(payload.recent_band.mean, n));
+  const clipFill = (yA, yB, color) => {
+    if (yB - yA <= 0) return;
+    ctx.save(); ctx.beginPath(); ctx.rect(left, yA, width, yB - yA); ctx.clip();
+    ctx.fillStyle = color; ctx.fill(area); ctx.restore();
+  };
+  clipFill(top, clamp(y0, top, top + height), alpha(C.good, .22));
+  clipFill(clamp(y0, top, top + height), top + height, alpha(C.bad, .22));
+
+  ctx.save();
+  ctx.setLineDash([3, 4]); ctx.lineWidth = 1; ctx.strokeStyle = alpha(C.dim, .55);
+  ctx.beginPath(); ctx.moveTo(left, y0); ctx.lineTo(left + width, y0); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineWidth = 1.5 * devicePixelRatio; ctx.strokeStyle = alpha(C.ink, .75);
+  ctx.beginPath();
+  for (let i = 0; i < d.length; i++) i ? ctx.lineTo(px(i), py(i)) : ctx.moveTo(px(i), py(i));
+  ctx.stroke(); ctx.restore();
+}
+
+/* region past compare_until — only one run still has data there.
+   The server returns min(len(mine), len(base)): the FIRST index at which the
+   two runs no longer overlap, so shading starts at it. When the lengths match
+   that index sits one past the last plotted x and the edge guard drops it. */
+function drawTail(u, p) {
+  if (p.compare_until == null) return;
+  const x = u.valToPos(p.compare_until, 'x', true);
+  const { left, top, width, height } = u.bbox;
+  if (x >= left + width - 1) return;
+  const ctx = u.ctx;
+  ctx.save();
+  ctx.fillStyle = alpha(C.bg, .72);
+  ctx.fillRect(x, top, left + width - x, height);
+  ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.strokeStyle = alpha(C.faint, .8);
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+  ctx.restore();
+}
+
+function readout(u, p) {
+  const i = u.cursor.idx;
+  const ratio = isRatio(p.metric);
+  const f = v => v == null ? '—' : ratio ? pct(v, 1) : num(v, 1);
+  if (uRate && uRate.data[0]) {
+    const d = uRate.data;
+    $('#lgRun').textContent = i == null ? f(p.curve ? p.curve.at(-1) : null) : f(d[5] && d[5][i]);
+    $('#lgPb').textContent = i == null ? '—' : f(d[4] && d[4][i]);
+    $('#lgBand').textContent = i == null ? '—' : f(d[3] && d[3][i]);
+    $('#lgT').textContent = i == null ? '' : i + 's';
   }
-  if (payload.pb_curve) {
-    series.push({ label: "PB", stroke: "#fbbf24", width: 1, dash: [6, 4] });
-    data.push(fit(payload.pb_curve, n));
-  }
-
-  state.rate = destroy(state.rate);
-  state.rate = new uPlot({
-    width: $("rate").clientWidth, height: 240, series, axes: axes(), bands,
-    scales: { x: { time: false } }, cursor: { sync: { key: "kv" } },
-  }, data, $("rate"));
+  const cd = p.cumulative_delta;
+  if (cd) $('#lgDelta').textContent = signed(i == null ? cd.at(-1) : cd[clamp(i, 0, cd.length - 1)], 1);
 }
 
-function drawDelta(payload) {
-  state.delta = destroy(state.delta);
-  if (!payload.cumulative_delta) {
-    $("delta").innerHTML = '<p class="muted">no PB curve to compare against yet</p>';
+function renderCharts(p) {
+  const hasCurve = !!(p.curve && p.curve.length);
+  $('#chartRate').hidden = !hasCurve;
+  $('#rateEmpty').hidden = hasCurve;
+  if (uRate) { uRate.destroy(); uRate = null; }
+  if (uDelta) { uDelta.destroy(); uDelta = null; }
+
+  $('#rateUnit').textContent = METRICS.find(m => m[0] === p.metric)[1];
+  $('#lgRecentN').textContent = p.baselines.recent_n;
+
+  // "PB" overlay may be the best *charted* run instead of the true PB — say so.
+  const note = $('#rateNote'), pbLab = $('#lgPbLabel');
+  const b = p.baselines;
+  if (b.pb && b.pb.is_true_pb === false && b.true_pb) {
+    note.hidden = false;
+    note.textContent = `overlay = best charted run ${num(b.pb.score, 1)} · true PB ${num(b.true_pb.score, 1)} has no curve`;
+    pbLab.textContent = 'best charted';
+  } else { note.hidden = true; pbLab.textContent = 'PB'; }
+
+  if (!hasCurve) {
+    $('#rateEmpty').innerHTML = p.run.buckets === 0
+      ? `<strong>no per-second data</strong><span>KovaaK's wrote no <code>.perf</code> file for this run, so only the totals above are known. Roughly one run in seven lands this way.</span>`
+      : `<strong>waiting for curve</strong><span>The run landed but its per-second file has not been parsed yet.</span>`;
+    $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
+    $('#deltaEmpty').innerHTML = `<span>Nothing to compare second by second.</span>`;
+    $('#lgRun').textContent = $('#lgPb').textContent = $('#lgBand').textContent = $('#lgDelta').textContent = '—';
     return;
   }
-  $("delta").innerHTML = "";
-  const values = payload.cumulative_delta;
-  const t = Array.from({ length: values.length }, (_, i) => i);
-  const cut = payload.compare_until;
-  const tail = cut != null && cut < values.length
-    ? ` (only one run has data past ${cut}s)` : "";
-  state.delta = new uPlot({
-    width: $("delta").clientWidth, height: 200,
-    series: [{}, {
-      label: `cumulative Δ score vs PB${tail}`,
-      stroke: (u) => (u.data[1].at(-1) >= 0 ? "#4ade80" : "#f87171"),
-      fill: (u) => (u.data[1].at(-1) >= 0 ? "rgba(74,222,128,.15)"
-                                          : "rgba(248,113,113,.15)"),
-      width: 2,
-    }],
-    axes: axes(), scales: { x: { time: false } },
-    cursor: { sync: { key: "kv" } },
-  }, [t, values], $("delta"));
+
+  const n = Math.max(p.curve.length, p.pb_curve ? p.pb_curve.length : 0, p.recent_band ? p.recent_band.mean.length : 0);
+  const at = (arr, i) => arr && i < arr.length ? arr[i] : null;
+  const xs = Array.from({ length: n }, (_, i) => i);
+  const col = arr => xs.map(i => at(arr, i));
+  const data = [xs, col(p.recent_band && p.recent_band.lo), col(p.recent_band && p.recent_band.hi),
+                col(p.recent_band && p.recent_band.mean), col(p.pb_curve), col(p.curve)];
+  uRate = mkRate($('#chartRate'), data, p);
+
+  const hasDelta = !!(p.cumulative_delta && p.cumulative_delta.length);
+  $('#chartDelta').hidden = !hasDelta; $('#deltaEmpty').hidden = hasDelta;
+  if (hasDelta) {
+    const dx = Array.from({ length: p.cumulative_delta.length }, (_, i) => i);
+    uDelta = mkDelta($('#chartDelta'), [dx, p.cumulative_delta], p);
+  } else {
+    $('#lgDelta').textContent = '—';
+    $('#deltaEmpty').innerHTML = `<strong>no baseline curve</strong><span>${p.baselines.candidates ? 'No earlier run of this scenario has per-second data to compare against.' : 'First run of this scenario — nothing to compare against yet.'}</span>`;
+  }
+  readout({ cursor: { idx: null } }, p);
 }
 
-function pct(mine, base) {
-  // A baseline of 0 makes "percent change" undefined, not infinite or zero --
-  // !base also catches null/undefined baselines, which is the common case.
-  if (!base) return null;
-  return ((mine - base) / base) * 100;
+const ro = new ResizeObserver(() => {
+  if (uRate) uRate.setSize({ width: $('#chartRate').clientWidth, height: $('#chartRate').clientHeight });
+  if (uDelta) uDelta.setSize({ width: $('#chartDelta').clientWidth, height: $('#chartDelta').clientHeight });
+});
+ro.observe($('#chartRate')); ro.observe($('#chartDelta'));
+
+/* ═══════════════════════════ HEADLINE ═════════════════════ */
+function renderHeadline(p, isNew) {
+  const r = p.run, hl = $('#headline');
+  $('#hlScenario').textContent = r.scenario;
+  $('#hlTime').textContent = hhmmss(r.started_at);
+  $('#hlDur').textContent = num(r.duration_s, 0) + ' s';
+  $('#hlCfg').textContent = `${num(r.cm360, 1)} cm/360 · ${r.fov}° · ${r.dpi} dpi`;
+  $('#hlScore').textContent = num(r.score, 1);
+
+  const base = p.delta_baseline;
+  const d = $('#hlDelta');
+  if (base) {
+    const diff = r.score - base.score;
+    const rel = diff / base.score;
+    const sign = diff > 0.05 ? 'up' : diff < -0.05 ? 'down' : 'flat';
+    d.dataset.sign = sign;
+    $('#hlArrow').textContent = sign === 'up' ? '▲' : sign === 'down' ? '▼' : '▬';
+    $('#hlDeltaPct').textContent = (diff >= 0 ? '+' : '−') + Math.abs(rel * 100).toFixed(1) + '%';
+    $('#hlDeltaSub').textContent =
+      `${sign === 'up' ? 'ahead of' : sign === 'down' ? 'behind' : 'level with'} ` +
+      `${base.is_true_pb ? 'PB' : 'best charted'} ${num(base.score, 1)} · ${signed(diff, 1)} pts`;
+    hl.dataset.state = 'ok';
+  } else {
+    d.dataset.sign = 'none';
+    $('#hlArrow').textContent = '·';
+    $('#hlDeltaPct').textContent = '—';
+    $('#hlDeltaSub').textContent = p.baselines.candidates ? 'no comparable earlier run' : 'first run of this scenario';
+    hl.dataset.state = 'nobaseline';
+  }
+
+  const rm = p.baselines.recent_mean_score;
+  const cells = [
+    ['acc', pct(r.accuracy, 1)],
+    ['spm', num(r.spm, 0)],
+    ['kills', num(r.kills, 0)],
+    ['avg ttk', num(r.avg_ttk, 2) + '<small> s</small>'],
+    ['hits', `${num(r.hits, 0)}<small> / ${num(r.shots, 0)}</small>`],
+    ['recent mean', rm ? num(rm, 0) : '—'],
+    ['vs recent', rm ? signed((r.score - rm) / rm * 100, 1) + '<small>%</small>' : '—'],
+    ['fps', num(r.avg_fps, 0)]
+  ];
+  $('#hlStats').innerHTML = cells.map(([k, v]) => `<div class="cell"><dt>${k}</dt><dd class="num">${v}</dd></div>`).join('');
+
+  if (isNew) { hl.classList.remove('flash'); void hl.offsetWidth; hl.classList.add('flash'); setTimeout(() => hl.classList.remove('flash'), 950); }
 }
 
-function renderHeadline(payload) {
-  const run = payload.run;
-  const b = payload.baselines;
-  void b;
-  $("scenario").textContent = run.scenario;
-  $("headline").textContent = run.score == null ? "--" : run.score.toFixed(0);
+/* ═══════════════════════════ RUN RAIL ═════════════════════ */
+function renderRunList(newId) {
+  const ol = $('#runlist');
+  const focused = A.runs.find(r => r.id === A.focusedId);
+  let list = A.runs;
+  if (A.filterScenario) list = list.filter(r => r.scenario === A.filterScenario);
 
-  const parts = [];
-  // pct() returns null for an undefined percentage (e.g. a zero baseline
-  // score); render a dash instead of letting null.toFixed(1) throw and blank
-  // the whole dashboard before either chart draws.
-  const signed = (d, label) => d == null
-    ? `<span class="muted">-- ${label}</span>`
-    : `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "+" : ""}${d.toFixed(1)}% ${label}</span>`;
+  $('#railFilter').hidden = !A.filterScenario;
+  if (A.filterScenario) $('#railFilter').textContent = A.filterScenario + '  ✕';
 
-  // The percentage MUST be measured against whatever the delta chart is drawn
-  // against, or the number and the chart contradict each other on exactly the
-  // runs where the true PB has no curve.
-  const drawn = payload.delta_baseline;
-  if (drawn) {
-    parts.push(signed(pct(run.score, drawn.score),
-                      drawn.is_true_pb ? "vs PB" : "vs best charted run"));
-  } else if (b.true_pb) {
-    parts.push(signed(pct(run.score, b.true_pb.score), "vs PB"));
+  if (!list.length) {
+    ol.innerHTML = `<li class="rail-empty">${A.health && A.health.awaiting_perf
+      ? 'Building the index from your KovaaK\'s stats folder. Runs appear as they are parsed.'
+      : 'No runs yet. Finish a scenario and it shows up here about a second later.'}</li>`;
+    $('#railFoot').textContent = '';
+    return;
   }
-  if (drawn && !drawn.is_true_pb && b.true_pb) {
-    parts.push(`<span class="muted">true PB ${b.true_pb.score.toFixed(0)} has no curve data</span>`);
-  }
-  if (b.recent_mean_score) {
-    parts.push(signed(pct(run.score, b.recent_mean_score), `vs last ${b.recent_n}`));
-  }
-  if (!b.candidates) {
-    parts.push('<span class="muted">first run of this scenario</span>');
-  }
-  $("deltas").innerHTML = parts.join("");
-}
 
-async function show(runId) {
-  state.runId = runId;
-  const response = await fetch(`/api/run/${runId}?${opts()}`);
-  if (!response.ok) return;
-  const payload = await response.json();
-  renderHeadline(payload);
-  drawRate(payload);
-  drawDelta(payload);
-  document.querySelectorAll("#runs li").forEach((li) => {
-    li.classList.toggle("active", Number(li.dataset.id) === runId);
+  // per-run delta vs the best earlier run of the same scenario (same language as the headline)
+  const bestBefore = {};
+  const marks = {};
+  [...list].reverse().forEach(r => {
+    const b = bestBefore[r.scenario];
+    marks[r.id] = { d: b == null ? null : (r.score - b) / b, pb: b == null || r.score > b };
+    bestBefore[r.scenario] = b == null ? r.score : Math.max(b, r.score);
   });
+
+  ol.innerHTML = list.map((r, i) => {
+    const m = marks[r.id], sign = !m.d ? 'flat' : m.d > 0 ? 'up' : 'down';
+    return `<li class="run" role="option" data-id="${r.id}" data-i="${i}"
+      aria-selected="${r.id === A.focusedId}"
+      data-same="${focused && r.scenario === focused.scenario ? 1 : 0}"
+      data-pb="${m.pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}">
+      <span class="t">${hhmm(r.started_at)}</span>
+      <span class="name">${r.scenario}</span>
+      <span class="right"><span class="sc">${num(r.score, 1)}</span>
+      <span class="d">${m.d == null ? 'first' : (m.d > 0 ? '▲' : m.d < 0 ? '▼' : '') + Math.abs(m.d * 100).toFixed(1) + '%'}</span></span>
+    </li>`;
+  }).join('');
+
+  if (newId != null) {
+    const el = ol.querySelector(`[data-id="${newId}"]`);
+    if (el) { el.classList.add('enter'); setTimeout(() => el.classList.remove('enter'), 600); }
+  }
+  const sel = ol.querySelector('[aria-selected="true"]');
+  if (sel) ol.scrollTop = clamp(sel.offsetTop - ol.clientHeight / 2, 0, ol.scrollHeight);
+
+  const pbMark = focused ? list.filter(r => r.scenario === focused.scenario).length : 0;
+  $('#railFoot').innerHTML = `${list.length} runs · ${pbMark} of this scenario · ↑↓ to move, ⏎ to focus`;
 }
 
-async function refreshRuns(focusNewest) {
-  const rows = await (await fetch("/api/runs?limit=25")).json();
-  $("runs").innerHTML = rows.map((r) =>
-    `<li data-id="${r.id}" title="${r.scenario}">${r.score == null ? "--" : r.score.toFixed(0)}</li>`
-  ).join("");
-  $("runs").querySelectorAll("li").forEach((li) => {
-    li.onclick = () => show(Number(li.dataset.id));
-  });
-  if (focusNewest && rows.length) show(rows[0].id);
+/* ═══════════════════════════ SHEETS ═══════════════════════ */
+async function renderSession() {
+  const s = await api('/api/session/today');
+  $('#sessionDay').textContent = s.day;
+  const by = {};
+  s.runs.forEach(r => (by[r.scenario] = by[r.scenario] || []).push(r));
+  const names = Object.keys(by);
+  if (!s.runs.length) {
+    $('#sessionSum').innerHTML = '';
+    $('#sessionTable').innerHTML = `<tbody><tr><td style="padding:22px 0;color:var(--faint)">No runs today yet.</td></tr></tbody>`;
+    return;
+  }
+  const accs = s.runs.map(r => r.accuracy);
+  const best = s.runs.reduce((a, b) => b.score > a.score ? b : a);
+  const span = (new Date(s.runs.at(-1).started_at) - new Date(s.runs[0].started_at)) / 6e4;
+  const cells = [
+    ['runs', s.runs.length], ['scenarios', names.length],
+    ['best', num(best.score, 1)],
+    ['mean acc', pct(accs.reduce((a, b) => a + b, 0) / accs.length, 1)],
+    ['span', Math.abs(Math.round(span)) + ' min']
+  ];
+  $('#sessionSum').innerHTML = cells.map(([k, v]) => `<div class="cell"><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+
+  $('#sessionTable').innerHTML = `<thead><tr><th>Scenario</th><th>Runs</th><th>Best</th><th>Mean</th><th>Acc</th><th>Shape</th><th>Last</th></tr></thead><tbody>` +
+    names.map(nm => {
+      const rs = by[nm].slice().sort((a, b) => a.started_at < b.started_at ? -1 : 1);
+      const mx = Math.max(...rs.map(r => r.score)), mn = Math.min(...rs.map(r => r.score));
+      const bars = rs.map(r => `<i style="height:${4 + (mx === mn ? 14 : (r.score - mn) / (mx - mn) * 14)}px" data-pb="${r.score === mx ? 1 : 0}"></i>`).join('');
+      const mean = rs.reduce((a, b) => a + b.score, 0) / rs.length;
+      const acc = rs.reduce((a, b) => a + b.accuracy, 0) / rs.length;
+      return `<tr data-run="${rs.at(-1).id}"><td class="name">${nm}</td><td class="n">${rs.length}</td>
+        <td class="n pb">${num(mx, 1)}</td><td class="n">${num(mean, 1)}</td><td class="n">${pct(acc, 1)}</td>
+        <td><div class="bars">${bars}</div></td><td class="n">${hhmm(rs.at(-1).started_at)}</td></tr>`;
+    }).join('') + '</tbody>';
 }
 
-function subscribe() {
-  const source = new EventSource("/events");
-  source.onopen = () => { $("status").textContent = "watching"; };
-  source.onerror = () => { $("status").textContent = "reconnecting"; };
-  source.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    if (message.type === "run") refreshRuns(true);
+async function renderScenarios() {
+  const list = await api('/api/scenarios');
+  $('#scenSub').textContent = `${list.length} scenarios · click to filter the run list`;
+  const val = v => Array.isArray(v) ? v.at(-1) : v;
+  $('#scenTable').innerHTML = `<thead><tr><th>Scenario</th><th>Runs</th><th>PB</th><th>Recent form</th><th>% of PB</th><th></th><th>Last played</th></tr></thead><tbody>` +
+    list.map(s => {
+      const form = val(s.recent_form);
+      const rel = form != null && s.pb ? form / s.pb : null;
+      const w = rel == null ? 0 : clamp((rel - .7) / .3, .02, 1) * 100;   // 70–100 % of PB spread across the bar
+      return `<tr data-scenario="${s.scenario}"><td class="name">${s.scenario}</td><td class="n">${s.runs}</td>
+        <td class="n pb">${num(s.pb, 1)}</td><td class="n">${form == null ? '—' : num(form, 1)}</td>
+        <td class="n">${rel == null ? '—' : (rel * 100).toFixed(1) + '%'}</td>
+        <td><div class="formbar"><i style="width:${w}%"></i></div></td>
+        <td class="n">${s.last_played ? hhmm(s.last_played) : '—'}</td></tr>`;
+    }).join('') + '</tbody>';
+}
+
+/* ═══════════════════════════ LOADING ══════════════════════ */
+async function loadRun(id, isNew) {
+  const c = A.ctrl;
+  const p = await api(`/api/run/${id}?metric=${c.metric}&smoothing=${c.smoothing}&recent_n=${c.recent_n}&same_cfg=${c.same_cfg ? 1 : 0}`);
+  if (!p) return;
+  A.payload = p; A.focusedId = id;
+  renderHeadline(p, isNew);
+  renderCharts(p);
+  renderRunList(isNew ? id : null);
+}
+
+async function refresh(isNew) {
+  // Every SSE message lands here with nothing above it to catch a rejection.
+  // Without this the page would sit on stale data after a failed request and
+  // still claim "live".
+  try {
+    A.health = await api('/api/health');
+    const h = A.health;
+    const hEl = $('#health');
+    hEl.hidden = !(h.awaiting_perf || h.watcher_errors || h.failed || h.suspect_fov);
+    hEl.textContent = [
+      h.awaiting_perf ? `indexing · ${h.curves}/${h.runs} curves` : '',
+      h.watcher_errors ? `${h.watcher_errors} watcher errors` : '',
+      h.suspect_fov ? `${h.suspect_fov} suspect fov` : ''
+    ].filter(Boolean).join('  ·  ');
+
+    A.runs = await api('/api/runs?limit=100');
+    if (!A.runs.length) {
+      A.payload = null;
+      if (uRate) { uRate.destroy(); uRate = null; }
+      if (uDelta) { uDelta.destroy(); uDelta = null; }
+      $('#headline').dataset.state = 'empty';
+      $('#hlScenario').textContent = h.awaiting_perf ? 'Building index…' : 'Waiting for your first run';
+      $('#hlTime').textContent = '—'; $('#hlDur').textContent = '—';
+      $('#hlCfg').textContent = h.awaiting_perf ? `${h.curves} of ${h.runs} parsed` : 'kvstats is watching your stats folder';
+      $('#hlScore').textContent = '—'; $('#hlDeltaPct').textContent = '—';
+      $('#hlDelta').dataset.sign = 'none';
+      $('#hlArrow').textContent = '·';
+      $('#rateNote').hidden = true;
+      $('#lgRun').textContent = $('#lgPb').textContent = $('#lgBand').textContent = $('#lgDelta').textContent = $('#lgT').textContent = '—';
+      $('#hlDeltaSub').textContent = h.awaiting_perf ? 'first launch — this runs once' : 'play a scenario to begin';
+      $('#hlStats').innerHTML = '';
+      $('#chartRate').hidden = true; $('#rateEmpty').hidden = false;
+      $('#rateEmpty').innerHTML = `<strong>${h.awaiting_perf ? 'indexing' : 'no runs yet'}</strong><span>${h.awaiting_perf ? 'Reading the history in your stats folder. The first chart appears as soon as a run with per-second data is parsed.' : 'The next run you finish lands here about a second after it ends.'}</span>`;
+      $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
+      $('#deltaEmpty').innerHTML = '<span>—</span>';
+      renderRunList();
+      return;
+    }
+    const focus = (isNew || !A.focusedId || !A.runs.some(r => r.id === A.focusedId)) ? A.runs[0].id : A.focusedId;
+    A.kbd = A.runs.findIndex(r => r.id === focus);
+    await loadRun(focus, isNew);
+  } catch (err) {
+    setStatus('down', 'api error');
+  }
+}
+
+/* ═══════════════════════════ CONTROLS ═════════════════════ */
+function buildSegs() {
+  $('#ctlMetric').innerHTML = METRICS.map(([k, l]) =>
+    `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.metric === k}">${k}</button>`).join('');
+  $('#ctlSmooth').innerHTML = SMOOTH.map(([k, l]) =>
+    `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.smoothing === k}">${l}</button>`).join('');
+}
+buildSegs();
+
+$('#ctlMetric').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  A.ctrl.metric = b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+});
+$('#ctlSmooth').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  A.ctrl.smoothing = +b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+});
+$('.stepper').addEventListener('click', e => {
+  const b = e.target.closest('button[data-step]'); if (!b) return;
+  const i = $('#ctlRecent');
+  i.value = clamp(+i.value + +b.dataset.step, 1, 50);
+  i.dispatchEvent(new Event('change'));
+});
+$('#ctlRecent').addEventListener('change', e => {
+  A.ctrl.recent_n = clamp(+e.target.value || 10, 1, 50);
+  e.target.value = A.ctrl.recent_n;
+  if (A.focusedId) loadRun(A.focusedId);
+});
+$('#ctlSameCfg').addEventListener('change', e => {
+  A.ctrl.same_cfg = e.target.checked; if (A.focusedId) loadRun(A.focusedId);
+});
+
+/* views */
+$$('.vtab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
+function setView(v) {
+  A.view = v;
+  $$('.vtab').forEach(t => t.setAttribute('aria-selected', t.dataset.view === v));
+  $('#view-run').hidden = v !== 'run';
+  $('#view-session').hidden = v !== 'session';
+  $('#view-scenarios').hidden = v !== 'scenarios';
+  if (v === 'session') renderSession();
+  if (v === 'scenarios') renderScenarios();
+  if (v === 'run' && uRate) ro.disconnect(), ro.observe($('#chartRate')), ro.observe($('#chartDelta'));
+}
+
+/* run list interaction */
+$('#runlist').addEventListener('click', e => {
+  const li = e.target.closest('.run'); if (!li) return;
+  A.kbd = +li.dataset.i; loadRun(+li.dataset.id);
+});
+$('#railFilter').addEventListener('click', () => { A.filterScenario = null; renderRunList(); });
+
+$('#sessionTable').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-run]'); if (!tr) return;
+  setView('run'); loadRun(+tr.dataset.run);
+});
+$('#scenTable').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-scenario]'); if (!tr) return;
+  A.filterScenario = tr.dataset.scenario; setView('run');
+  const first = A.runs.find(r => r.scenario === A.filterScenario);
+  if (first) loadRun(first.id); else renderRunList();
+});
+
+/* keyboard: ↑↓ through runs, ⏎ focus, Esc back to the run view */
+document.addEventListener('keydown', e => {
+  if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (A.view !== 'run') { if (e.key === 'Escape') setView('run'); return; }
+  const items = $$('.run', $('#runlist'));
+  if (!items.length) return;
+  const move = d => {
+    A.kbd = clamp((A.kbd < 0 ? 0 : A.kbd) + d, 0, items.length - 1);
+    items.forEach(el => el.classList.remove('kbd'));
+    const el = items[A.kbd]; el.classList.add('kbd');
+    $('#runlist').scrollTop = clamp(el.offsetTop - $('#runlist').clientHeight / 2, 0, $('#runlist').scrollHeight);
+    loadRun(+el.dataset.id);
+  };
+  if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+  else if (e.key === 'Home') { e.preventDefault(); A.kbd = 0; move(0); }
+  else if (e.key === 'End') { e.preventDefault(); A.kbd = items.length - 1; move(0); }
+  else if (e.key === 'Enter') { const el = items[clamp(A.kbd, 0, items.length - 1)]; if (el) loadRun(+el.dataset.id); }
+});
+
+/* ═══════════════════════════ SSE ══════════════════════════ */
+function setStatus(state, label) {
+  const s = $('#status'); s.dataset.state = state;
+  s.querySelector('.status-label').textContent = label;
+}
+let es = null, retry = 0;
+function connect() {
+  setStatus('connecting', 'connecting');
+  es = new EventSource(API + '/events');
+  es.onopen = () => { retry = 0; setStatus('live', 'live'); };
+  es.onmessage = ev => {
+    let m = {}; try { m = JSON.parse(ev.data); } catch (_) {}
+    if (m.type === 'run') refresh(true);
+  };
+  es.onerror = () => {
+    es.close();
+    retry = Math.min(retry + 1, 6);
+    setStatus('down', `reconnecting ${retry * 2}s`);
+    setTimeout(connect, retry * 2000);
   };
 }
 
-for (const id of ["metric", "smoothing", "recent", "samecfg"]) {
-  $(id).addEventListener("change", () => { if (state.runId) show(state.runId); });
-}
-// Resizing fires ~60x/s while dragging. show() is a full fetch plus two chart
-// rebuilds, so it must be debounced -- and a resize needs neither.
-let resizeTimer = null;
-window.addEventListener("resize", () => {
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    for (const chart of [state.rate, state.delta]) {
-      if (chart) chart.setSize({ width: chart.root.parentNode.clientWidth,
-                                 height: chart.height });
-    }
-  }, 150);
-});
+/* ═══════════════════════════ BOOT ═════════════════════════ */
+readColors();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); if (A.payload) renderCharts(A.payload); });
+refresh(false).then(connect);
 
-refreshRuns(true);
-subscribe();
+})();
