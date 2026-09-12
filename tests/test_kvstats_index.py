@@ -118,5 +118,72 @@ class Rebuild(IndexBase):
         self.assertEqual(total, 0)
 
 
+class ScenarioShapes(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        shutil.copytree(os.path.join(FIXTURES, "stats"), os.path.join(self.dir, "stats"))
+        shutil.copytree(os.path.join(FIXTURES, "performances"),
+                        os.path.join(self.dir, "performances"))
+        self.cfg = paths.load({"KOVAAKS_DIR": self.dir,
+                               "KVSTATS_DB": os.path.join(self.dir, "i.sqlite3")})
+        self.conn = index.connect(self.cfg.db_path)
+        self.addCleanup(self.conn.close)
+        index.bootstrap(self.conn, self.cfg)
+
+    def test_a_countdown_scenario_is_classified_race_with_its_pool_and_bots(self):
+        row = index.scenario_row(self.conn, "Air Pure Medium")
+        self.assertEqual(row["shape"], "race")
+        self.assertEqual(row["evidence"], "perf-countdown")
+        # The .perf score series round-trips through float32, so the raw
+        # budget is ~999.998, not exactly 1000 -- places=1 still catches any
+        # real budget error.
+        self.assertAlmostEqual(row["budget"], 1000.0, places=1)
+        self.assertAlmostEqual(row["pool"], 5000.0, places=1)
+        self.assertEqual(row["bots"], 5)
+
+    def test_a_curveless_race_scenario_falls_back_to_the_csv_test(self):
+        """Air Spectral Easy is fixtured with no .perf at all, so tier 1
+        cannot fire and the two-run budget test has to carry it."""
+        row = index.scenario_row(self.conn, "Air Spectral Easy")
+        self.assertEqual(row["shape"], "race")
+        self.assertEqual(row["evidence"], "csv-constant-budget")
+        self.assertEqual(row["bots"], 6)
+
+    def test_a_fixed_clock_scenario_stays_timed(self):
+        row = index.scenario_row(self.conn, "Air Voltaic Invincible 4 Medium")
+        self.assertEqual(row["shape"], "timed")
+        self.assertEqual(row["evidence"], "default")
+        self.assertIsNone(row["budget"])
+        self.assertAlmostEqual(row["clock_s"], 60.0, places=0)
+
+    def test_negative_buckets_flag_a_penalising_scenario(self):
+        self.assertEqual(index.scenario_row(self.conn, "VT 1w2ts Horizontal Small")["penalising"], 1)
+        self.assertEqual(index.scenario_row(self.conn, "Air Voltaic Invincible 4 Medium")["penalising"], 0)
+
+    def test_kill_rows_are_stored_and_reconcile_to_the_score(self):
+        """The one assertion that catches a per-kill parse error, a dead-time
+        sign error and a budget error at once."""
+        run = self.conn.execute(
+            "SELECT * FROM run WHERE scenario='Air Pure Medium' "
+            "ORDER BY started_at LIMIT 1").fetchone()
+        kills = index.load_kills(self.conn, run["id"])
+        self.assertEqual(len(kills), 5)
+        self.assertEqual(kills[0]["bot"], "AIR1_Short_close")
+
+        splits = sum(k["ttk"] for k in kills)
+        dead = run["elapsed_s"] - splits
+        budget = index.scenario_row(self.conn, "Air Pure Medium")["budget"]
+        self.assertAlmostEqual(splits, 92.808, places=2)
+        self.assertAlmostEqual(dead, 1.041, places=2)
+        self.assertAlmostEqual(splits + dead, run["elapsed_s"], places=6)
+        self.assertAlmostEqual(run["elapsed_s"], budget - run["score"], places=1)
+
+    def test_a_tracking_run_stores_no_kills(self):
+        run = self.conn.execute(
+            "SELECT id FROM run WHERE scenario='Air Voltaic Invincible 4 Medium'").fetchone()
+        self.assertEqual(index.load_kills(self.conn, run["id"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

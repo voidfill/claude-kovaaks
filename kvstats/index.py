@@ -8,11 +8,13 @@ re-bootstrap" a legitimate migration: a full rebuild costs about 21 seconds.
 import array
 import os
 import sqlite3
+import statistics
 
 from . import perf as perfmod
+from . import shapes
 from . import statscsv
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_TRIES = 5
 
 SCHEMA = """
@@ -26,6 +28,7 @@ CREATE TABLE run (
   accuracy REAL, damage_done REAL, damage_possible REAL,
   avg_ttk REAL, fight_time REAL, pause_count INTEGER,
   duration_s REAL, spm REAL,
+  elapsed_s REAL, overshots INTEGER, reloads INTEGER, damage_taken REAL,
   hash TEXT, game_version TEXT,
   sens_raw REAL, sens_scale TEXT, dpi INTEGER, sens_increment REAL,
   cm360 REAL, cfg_key TEXT,
@@ -41,6 +44,24 @@ CREATE TABLE curve (
   dmg_done BLOB, dmg_possible BLOB, score BLOB, kills BLOB
 );
 
+CREATE TABLE kill (
+  run_id INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  idx    INTEGER NOT NULL,
+  t      REAL NOT NULL,
+  bot TEXT, weapon TEXT, ttk REAL,
+  shots INTEGER, hits INTEGER, overshots INTEGER,
+  dmg_done REAL, dmg_possible REAL,
+  PRIMARY KEY (run_id, idx)
+);
+
+CREATE TABLE scenario (
+  name       TEXT PRIMARY KEY,
+  shape      TEXT NOT NULL DEFAULT 'timed',
+  penalising INTEGER NOT NULL DEFAULT 0,
+  budget     REAL, pool REAL, bots INTEGER, clock_s REAL,
+  evidence   TEXT
+);
+
 CREATE TABLE failed (
   path TEXT PRIMARY KEY, tries INTEGER NOT NULL, last_error TEXT, last_try TEXT
 );
@@ -50,7 +71,9 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 _RUN_COLUMNS = (
     "scenario", "started_at", "stats_file", "perf_file", "score", "kills", "hits",
     "misses", "shots", "accuracy", "damage_done", "damage_possible", "avg_ttk",
-    "fight_time", "pause_count", "duration_s", "spm", "hash", "game_version",
+    "fight_time", "pause_count", "duration_s", "spm",
+    "elapsed_s", "overshots", "reloads", "damage_taken",
+    "hash", "game_version",
     "sens_raw", "sens_scale", "dpi", "sens_increment", "cm360", "cfg_key",
     "fov", "fov_scale", "resolution", "avg_fps",
 )
@@ -83,7 +106,12 @@ def connect(db_path):
     conn.execute("PRAGMA foreign_keys = ON")
 
     if _current_version(conn) != SCHEMA_VERSION:
-        for table in ("curve", "run", "failed", "meta"):
+        # kill and curve both hold a FK to run with foreign_keys=ON above, so
+        # both must drop before run does. Every table also has to be listed
+        # here at all: leaving one out means it survives this drop and the
+        # next version bump's CREATE TABLE for it fails because it still
+        # exists.
+        for table in ("kill", "curve", "run", "scenario", "failed", "meta"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.executescript(SCHEMA)
         conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)",
@@ -138,12 +166,18 @@ def index_stats_file(conn, path, commit=True):
         f"INSERT OR IGNORE INTO run({','.join(_RUN_COLUMNS)}) VALUES({placeholders})",
         values,
     )
+    if cursor.lastrowid and cursor.rowcount:
+        run_id = cursor.lastrowid
+    else:
+        existing = conn.execute(
+            "SELECT id FROM run WHERE stats_file=?", (path,)).fetchone()
+        run_id = existing[0] if existing else None
+
+    if run_id is not None:
+        store_kills(conn, run_id, statscsv.parse_kills(path), commit=False)
     if commit:
         conn.commit()
-    if cursor.lastrowid and cursor.rowcount:
-        return cursor.lastrowid
-    existing = conn.execute("SELECT id FROM run WHERE stats_file=?", (path,)).fetchone()
-    return existing[0] if existing else None
+    return run_id
 
 
 def attach_perf(conn, run_id, perf_path, commit=True):
@@ -184,6 +218,85 @@ def load_curve(conn, run_id):
         values.frombytes(row[name])
         out[name] = values
     return out
+
+
+def store_kills(conn, run_id, kills, commit=True):
+    """Replace this run's kill rows. A no-op for the ~46% of runs whose bots
+    are invincible and never die."""
+    conn.execute("DELETE FROM kill WHERE run_id=?", (run_id,))
+    if kills:
+        conn.executemany(
+            "INSERT INTO kill(run_id, idx, t, bot, weapon, ttk, shots, hits, "
+            "overshots, dmg_done, dmg_possible) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, k["idx"], k["t"], k["bot"], k["weapon"], k["ttk"], k["shots"],
+              k["hits"], k["overshots"], k["dmg_done"], k["dmg_possible"])
+             for k in kills])
+    if commit:
+        conn.commit()
+
+
+def load_kills(conn, run_id):
+    return conn.execute(
+        "SELECT * FROM kill WHERE run_id=? ORDER BY idx", (run_id,)).fetchall()
+
+
+def scenario_row(conn, name):
+    return conn.execute("SELECT * FROM scenario WHERE name=?", (name,)).fetchone()
+
+
+def refresh_scenario(conn, name, commit=True):
+    """Recompute one scenario's shape from every run the index holds for it.
+
+    A fold over rows already present, so it is cheap enough to run on every
+    new run rather than only at bootstrap -- which matters, because a second
+    run is exactly what promotes a curveless race scenario out of 'timed'.
+    """
+    runs = conn.execute(
+        "SELECT id, score, elapsed_s, duration_s, kills, hits, perf_file "
+        "FROM run WHERE scenario=?", (name,)).fetchall()
+    if not runs:
+        return None
+
+    curves = []
+    for run in runs:
+        if run["perf_file"] is None:
+            continue
+        curve = load_curve(conn, run["id"])
+        if curve:
+            curves.append(list(curve["score"]))
+
+    verdict = shapes.classify(
+        curves, [(r["score"], r["elapsed_s"]) for r in runs])
+
+    def median(values):
+        usable = [v for v in values if v is not None]
+        return statistics.median(usable) if usable else None
+
+    pool = bots = clock_s = None
+    penalising = 0
+    if verdict["shape"] == shapes.RACE:
+        # Hits are the damage pool: every hit is one damage in these scenarios,
+        # and the total is identical in every run of the same scenario.
+        pool = median([r["hits"] for r in runs])
+        bot_count = median([r["kills"] for r in runs])
+        bots = int(bot_count) if bot_count else None
+    else:
+        clock_s = median([r["duration_s"] for r in runs])
+        # A countdown is negative every bucket by construction; that is the
+        # clock, not a penalty, so this is only asked of timed scenarios.
+        penalising = int(any(shapes.is_penalising(c) for c in curves))
+
+    conn.execute(
+        "INSERT OR REPLACE INTO scenario"
+        "(name, shape, penalising, budget, pool, bots, clock_s, evidence) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (name, verdict["shape"], penalising, verdict["budget"],
+         pool, bots, clock_s, verdict["evidence"]))
+    if commit:
+        conn.commit()
+    return {"shape": verdict["shape"], "penalising": penalising,
+            "budget": verdict["budget"], "pool": pool, "bots": bots,
+            "clock_s": clock_s, "evidence": verdict["evidence"]}
 
 
 def bootstrap(conn, cfg):
@@ -233,5 +346,12 @@ def bootstrap(conn, cfg):
         if attach_perf(conn, run_id, perf_path, commit=False):
             counts["curves"] += 1
             counts["reconciled"] += 1
+    conn.commit()
+
+    # Classification is a fold over indexed rows, so it runs last -- after every
+    # curve is attached. Doing it per-file would classify a race scenario from
+    # its first run alone, before the evidence that settles it has landed.
+    for (name,) in conn.execute("SELECT DISTINCT scenario FROM run").fetchall():
+        refresh_scenario(conn, name, commit=False)
     conn.commit()
     return counts
