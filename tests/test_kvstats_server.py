@@ -91,6 +91,37 @@ class RunPayload(ServerBase):
         self.assertEqual(payload["rate"]["mine"], [])
         self.assertIsNone(payload["delta"]["values"])
 
+        # The curve is missing, but the splits come from the CSV kill rows,
+        # not the curve, so they must still be there and still reconcile.
+        bots = [s for s in payload["splits"] if s["idx"] is not None]
+        dead = [s for s in payload["splits"] if s["idx"] is None]
+        self.assertEqual(len(bots), 6)
+        self.assertEqual(len(dead), 1)
+        self.assertAlmostEqual(dead[0]["mine"], 0.059, places=3)
+        total = sum(s["mine"] for s in payload["splits"])
+        self.assertAlmostEqual(total, payload["run"]["elapsed_s"], places=6)
+        budget = payload["scenario"]["budget"]
+        self.assertAlmostEqual(total, budget - payload["run"]["score"], places=1)
+
+    def test_delta_baseline_names_the_pb_the_delta_is_measured_against(self):
+        """delta.baseline must always name the same PB that baselines.pb does,
+        on both shapes -- the UI cannot be left free to label the chart with
+        one baseline and the headline percentage with another."""
+        race = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        pb = race["baselines"]["pb"]
+        self.assertIsNotNone(pb)
+        self.assertEqual(race["delta"]["baseline"], {
+            "run_id": pb["run_id"], "score": pb["score"],
+            "is_true_pb": pb["is_true_pb"]})
+
+        # No timed scenario in these fixtures has a second run with a curve,
+        # so this is also the real coverage for "no PB curve backs the delta"
+        # -- the exact case the field must fall back to None for.
+        timed = server.build_run_payload(
+            self.conn, self.run_for("VT Ground Intermediate S5"))
+        self.assertIsNone(timed["baselines"]["pb"])
+        self.assertIsNone(timed["delta"]["baseline"])
+
     def test_efficiency_is_withheld_where_damage_is_only_booked_at_kill_time(self):
         """VT Ground Intermediate S5 books damage at kill time: its whole-run
         dmg_possible is 6.0 against 6001 shots, so a per-second ratio is a flat
