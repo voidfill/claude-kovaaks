@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.kvpl-tmp
+.claude/worktrees/
+.superpowers/
+*.sqlite3

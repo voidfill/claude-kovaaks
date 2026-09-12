@@ -42,6 +42,33 @@ with code 3 and is left untouched. If you edit a skill-made playlist in-game and
 rewrites the author field, the skill will stop being able to edit it — that is the safe
 direction, and you can always clone it again.
 
+## kvstats
+
+A localhost dashboard over your KovaaK's run history. It watches the game's output
+and, about a second after a run ends, shows that run's per-second curve against your
+PB and your recent form — so you can see not just whether you did better, but where
+in the run you did.
+
+```
+python -m kvstats
+```
+
+Then open the printed URL. Stdlib only, no install, no build step; it works offline.
+
+The first launch indexes your whole history into a SQLite cache outside the game directory
+(about 5 s for ~2330 runs, producing a database of about 6.3 MB). After that it only reads
+new files. The cache is disposable — delete it and it rebuilds.
+
+**It never writes to the KovaaK's install.**
+
+Two things worth knowing about the data:
+
+- KovaaK's writes a `.perf` time-series alongside most runs, but not all — runs
+  without one still appear, just without a curve.
+- Runs are only compared against runs at the same true sensitivity (cm/360), since
+  comparing across a sens change is not a fair comparison. Toggle it off in the UI if
+  you want to compare anyway.
+
 ## Layout
 
 ```
@@ -49,7 +76,8 @@ direction, and you can always clone it again.
     SKILL.md             the skill Claude reads
     scripts/kvpl.py      the CLI, single file, stdlib only
     references/kovaaks.md   on-disk format and API notes, verified against a real install
-tests/                   four tests: encodings, byte-exact writes, the gate, cloning
+kvstats/                 the dashboard: parser, index, watcher, server, web assets
+tests/                   unit tests for the playlist CLI and every kvstats module
 docs/                    design spec
 ```
 
@@ -69,5 +97,10 @@ mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" ^
 
 ## Scope
 
-Playlists only. Stats analysis, game settings and benchmark tracking are deliberately
-out of scope.
+Two tools, deliberately separate:
+
+- **`kovaaks-playlists`** — the Claude Code skill. Playlists only; it never reads stats.
+- **`kvstats`** — a local dashboard over your run history. Read-only; it never writes
+  to the game.
+
+Game settings and benchmark rank tracking remain out of scope for both.
