@@ -146,5 +146,99 @@ class Baselines(unittest.TestCase):
         self.assertIsNone(got["recent"]["curve"])
 
 
+class RaceResampling(unittest.TestCase):
+    """A race scenario is a fixed amount of work against a free clock, so the
+    meaningful axis is share of that work, not wall-clock seconds."""
+
+    def test_the_grid_puts_kill_boundaries_on_exact_indices(self):
+        self.assertEqual(compare.race_grid(5), 200)
+        self.assertEqual(compare.race_grid(6), 240)
+        self.assertEqual(compare.race_grid(8), 320)
+        for bots in (5, 6, 8):
+            steps = compare.race_grid(bots)
+            self.assertEqual(steps % bots, 0, "a boundary would fall between cells")
+
+    def test_a_flat_run_resamples_to_a_flat_rate_and_a_linear_clock(self):
+        hits = [50.0] * 100                    # 5000 damage over 100 seconds
+        edges, rate = compare.resample_race(hits, 100.0, 200)
+        self.assertEqual(len(edges), 201)
+        self.assertEqual(len(rate), 200)
+        self.assertAlmostEqual(edges[0], 0.0, places=6)
+        self.assertAlmostEqual(edges[-1], 100.0, places=6)
+        self.assertAlmostEqual(edges[100], 50.0, places=3)
+        for value in rate:
+            self.assertAlmostEqual(value, 50.0, places=3)
+
+    def test_the_last_edge_is_always_the_true_elapsed_time(self):
+        """The .perf buckets to whole seconds, so the curve's own length is a
+        rounded-up approximation. Anchoring the last edge to the CSV's elapsed
+        is what keeps the delta equal to the score difference."""
+        hits = [40.0] * 90 + [10.0]
+        edges, _ = compare.resample_race(hits, 85.994, 200)
+        self.assertAlmostEqual(edges[-1], 85.994, places=6)
+
+    def test_a_slow_stretch_shows_up_as_a_low_rate(self):
+        hits = [100.0] * 40 + [10.0] * 100 + [100.0] * 40   # stall in the middle
+        _, rate = compare.resample_race(hits, 180.0, 200)
+        self.assertGreater(rate[5], rate[100], "the stall must read as slower")
+
+    def test_degenerate_input_returns_empty_rather_than_dividing_by_zero(self):
+        self.assertEqual(compare.resample_race([], 60.0, 200), ([], []))
+        self.assertEqual(compare.resample_race([0.0, 0.0], 60.0, 200), ([], []))
+        self.assertEqual(compare.resample_race([1.0], 0.0, 200), ([], []))
+
+
+class RaceInvariant(unittest.TestCase):
+    def test_the_delta_ends_at_exactly_the_score_difference(self):
+        """The invariant the whole dashboard rests on, on the race path.
+
+        For a race, score = budget - elapsed, so the seconds one run gains on
+        another IS its score advantage. If this drifts, the chart's endpoint
+        and the headline number disagree.
+        """
+        mine_hits, base_hits = [50.0] * 100, [55.0] * 91
+        mine_elapsed, base_elapsed = 93.849, 85.994
+        steps = compare.race_grid(5)
+        mine_edges, _ = compare.resample_race(mine_hits, mine_elapsed, steps)
+        base_edges, _ = compare.resample_race(base_hits, base_elapsed, steps)
+
+        delta = compare.race_delta(mine_edges, base_edges)
+        self.assertEqual(len(delta), steps)
+
+        budget = 1000.0
+        score_difference = (budget - mine_elapsed) - (budget - base_elapsed)
+        self.assertAlmostEqual(delta[-1], score_difference, places=6)
+        self.assertAlmostEqual(delta[0], 0.0, places=1, msg="both runs start level")
+
+
+class RaceBaselines(unittest.TestCase):
+    def test_the_duration_filter_is_skipped_for_race_scenarios(self):
+        """Duration IS the score here. On the slowest real Air Pure Medium run
+        the +-10% floor is 84.9 s, which excludes the 81.2 s PB -- the overlay
+        disappears exactly when it is most wanted."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        shutil.copytree(os.path.join(FIXTURES, "stats"),
+                        os.path.join(directory, "stats"))
+        shutil.copytree(os.path.join(FIXTURES, "performances"),
+                        os.path.join(directory, "performances"))
+        cfg = paths.load({"KOVAAKS_DIR": directory,
+                          "KVSTATS_DB": os.path.join(directory, "i.sqlite3")})
+        conn = index.connect(cfg.db_path)
+        self.addCleanup(conn.close)
+        index.bootstrap(conn, cfg)
+
+        slow = conn.execute(
+            "SELECT id FROM run WHERE scenario='Air Pure Medium' "
+            "ORDER BY score ASC LIMIT 1").fetchone()[0]
+
+        # 93.85 s vs 85.99 s is a 8.4% gap -- inside +-10%, so force the issue
+        # by tightening the tolerance to something the pair cannot satisfy.
+        timed = compare.candidates(conn, slow, duration_tol=0.01)
+        raced = compare.candidates(conn, slow, duration_tol=0.01, shape="race")
+        self.assertEqual(len(timed), 0, "the filter should bite on the timed path")
+        self.assertEqual(len(raced), 1, "and never bite on the race path")
+
+
 if __name__ == "__main__":
     unittest.main()
