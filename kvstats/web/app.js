@@ -420,7 +420,7 @@ function renderSplits(p) {
   $('#splitSub').textContent = [
     `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`,
     `${num(total, 2)} s`,
-    baseTotal == null ? '' : `PB ${num(baseTotal, 2)} · ${signed(total - baseTotal, 2)}`,
+    baseTotal == null ? '' : `PB run ${num(baseTotal, 2)} · ${signed(total - baseTotal, 2)}`,
     `score ${num(p.run.score, 2)}`
   ].filter(Boolean).join('  ·  ');
 
@@ -440,11 +440,12 @@ function renderSplits(p) {
   };
   $('#splitTable').innerHTML =
     `<thead><tr><th>bot</th><th class="barh">time per bot</th><th>this run</th>
-       <th>PB</th><th>Δ PB</th><th>Δ run</th></tr></thead><tbody>` +
+       <th>PB run</th><th>Δ PB</th><th>best</th><th>Δ run</th></tr></thead><tbody>` +
     p.splits.map(s => `<tr class="${worst.includes(s.idx) ? 'w' : ''}">
       <td class="bot">${s.bot}</td><td class="barc">${bar(s)}</td>
       <td>${num(s.mine, 2)}</td><td>${num(s.base, 2)}</td>
-      <td>${cell(s.delta)}</td><td>${cell(s.delta_adj)}</td></tr>`).join('') +
+      <td>${cell(s.delta)}</td><td class="pb">${num(s.best, 2)}</td>
+      <td>${cell(s.delta_adj)}</td></tr>`).join('') +
     `</tbody>`;
 }
 
@@ -461,14 +462,15 @@ function renderWindows(p) {
   // above: there a delta is seconds spent, here it is damage taken.
   const cell = v => v == null ? '—'
     : `<span class="${v > 0 ? 'dn' : v < 0 ? 'up' : ''}">${signed(v * 100, 1)}</span>`;
-  const shown = rows.filter(r => r.mine != null);
-  const mean = shown.length ? shown.reduce((a, r) => a + r.mine, 0) / shown.length : null;
-  const pb = rows.filter(r => r.base != null);
+  // Damage taken over damage offered, weighted by window and computed on the
+  // server -- the mean of three per-window shares is a different number, and
+  // one that appears on no row and in no run.
+  const sum = p.window_summary || {};
   $('#splitSub').textContent = [
     `${rows.length} bots`,
     rows.every(r => r.window_s) ? `${num(rows[0].window_s, 1)}–${num(rows.at(-1).window_s, 1)} s windows` : '',
-    mean == null ? '' : `${pct(mean, 1)} of possible`,
-    pb.length ? `PB ${pct(pb.reduce((a, r) => a + r.base, 0) / pb.length, 1)}` : ''
+    sum.mine == null ? '' : `${pct(sum.mine, 1)} of possible`,
+    sum.base == null ? '' : `PB run ${pct(sum.base, 1)}`
   ].filter(Boolean).join('  ·  ');
 
   // The bots you actually lost against the PB on, at most two, for the same
@@ -478,7 +480,7 @@ function renderWindows(p) {
 
   $('#splitTable').innerHTML =
     `<thead><tr><th>bot</th><th class="barh">share of window</th><th>this run</th>
-       <th>PB</th><th>Δ PB</th><th>recent</th><th>Δ recent</th></tr></thead><tbody>` +
+       <th>PB run</th><th>Δ PB</th><th>best</th><th>recent</th><th>Δ recent</th></tr></thead><tbody>` +
     rows.map(r => {
       const tint = r.delta == null ? '' : r.delta > 0 ? ' dn' : r.delta < 0 ? ' up' : '';
       const width = r.mine == null ? 0 : clamp(r.mine, 0, 1) * 100;
@@ -488,6 +490,7 @@ function renderWindows(p) {
         <td>${r.mine == null ? '—' : pct(r.mine, 1)}</td>
         <td>${r.base == null ? '—' : pct(r.base, 1)}</td>
         <td>${cell(r.delta)}</td>
+        <td class="pb">${r.best == null ? '—' : pct(r.best, 1)}</td>
         <td>${r.recent == null ? '—' : pct(r.recent, 1)}</td>
         <td>${cell(r.delta_recent)}</td></tr>`;
     }).join('') + `</tbody>`;

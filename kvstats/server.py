@@ -132,6 +132,7 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
         "marks": {"kills": [], "labels": [], "aligned": False},
         "splits": [],
         "windows": [],
+        "window_summary": None,
         "baselines": {
             "true_pb": base["true_pb"],
             "candidates": base["candidates"],
@@ -145,13 +146,15 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
     }
 
     if is_race:
-        _fill_race(conn, payload, run, scenario, curve, base, smoothing)
+        _fill_race(conn, payload, run, scenario, curve, base, smoothing, same_cfg)
     else:
-        _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing)
+        _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing,
+                    same_cfg)
     return payload
 
 
-def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing):
+def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing,
+                same_cfg=True):
     """Native per-second grid, score units -- plus bot windows where the
     scenario spends its clock on a rotation of bots that never die."""
     mine = _series(curve, metric) if curve else []
@@ -164,7 +167,8 @@ def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing):
     if scenario["windowed"]:
         payload["marks"]["aligned"] = True
         payload["marks"]["labels"] = [k["bot"] for k in kills]
-        payload["windows"] = _bot_windows(conn, run, base)
+        payload["windows"] = _bot_windows(conn, run, base, same_cfg)
+        payload["window_summary"] = _window_summary(conn, run, base)
 
     if curve and base["pb"] and base["pb"]["curve"]:
         pb_curve = base["pb"]["curve"]
@@ -189,7 +193,8 @@ def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing):
                                    for k, v in raw.items()}
 
 
-def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
+def _fill_race(conn, payload, run, scenario, curve, base, smoothing,
+               same_cfg=True):
     """Progress axis, damage rate, seconds-based delta, shared kill marks."""
     bots = scenario["bots"] or 1
     steps = compare.race_grid(bots)
@@ -245,7 +250,7 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
             payload["rate"]["band"] = {k: compare.smooth(v, smoothing)
                                        for k, v in raw.items()}
 
-    payload["splits"] = _race_splits(conn, run, base)
+    payload["splits"] = _race_splits(conn, run, base, same_cfg)
     # Name the boundaries after the bots that hold them, reusing the rows the
     # split table already loaded. A run that quit early names fewer bots than
     # the scenario has; the chart falls back to the ordinal for the rest.
@@ -253,7 +258,54 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
                                   if split["idx"] is not None][:bots]
 
 
-def _race_splits(conn, run, base):
+def _peer_ids(conn, run, same_cfg, shape):
+    """Every run this one can fairly be judged against, and itself.
+
+    Itself because `best` is a ceiling: on the run that set it the column has
+    to read that run's own number and the gap has to be zero, not blank.
+    """
+    rows = compare.candidates(conn, run["id"], same_cfg=same_cfg, shape=shape)
+    return [row["id"] for row in rows] + [run["id"]]
+
+
+def _best_by_slot(conn, ids, expr, direction):
+    """{slot: best value of `expr`} over `ids`, best meaning MIN or MAX.
+
+    SQLite yields NULL rather than raising for x/0, so the IS NOT NULL guard
+    covers a window that offered no damage as well as a missing column.
+    """
+    if not ids:
+        return {}
+    holes = ",".join("?" * len(ids))
+    return {row["idx"]: row["best"] for row in conn.execute(
+        f"SELECT idx, {direction}({expr}) AS best FROM kill "
+        f"WHERE run_id IN ({holes}) AND ({expr}) IS NOT NULL GROUP BY idx",
+        list(ids))}
+
+
+def _share(kill):
+    possible = kill["dmg_possible"]
+    return None if not possible else kill["dmg_done"] / possible
+
+
+def _window_summary(conn, run, base):
+    """Whole-run share for this run and for the PB run.
+
+    Damage taken over damage offered, not the mean of the per-window shares:
+    the windows are not all the same length -- 18.99 s against 20.39 s on the
+    VT scenarios -- so an unweighted mean over-counts the short one.
+    """
+    def overall(run_id):
+        kills = index.load_kills(conn, run_id)
+        done = sum(k["dmg_done"] for k in kills if k["dmg_done"] is not None)
+        possible = sum(k["dmg_possible"] for k in kills if k["dmg_possible"])
+        return None if not possible else done / possible
+
+    return {"mine": overall(run["id"]),
+            "base": overall(base["pb"]["run_id"]) if base["pb"] else None}
+
+
+def _race_splits(conn, run, base, same_cfg=True):
     """Per-bot rows plus the dead-time residual, so the table reconciles.
 
     Dead time is not modelled as a scenario constant: it is stable within a
@@ -267,11 +319,17 @@ def _race_splits(conn, run, base):
     if base["pb"]:
         base_by_idx = {k["idx"]: k for k in index.load_kills(conn, base["pb"]["run_id"])}
 
+    # Fastest this bot has ever gone down, this run included -- the column
+    # says what the ceiling is, so the run that set it must show itself.
+    best = _best_by_slot(conn, _peer_ids(conn, run, same_cfg, shapes.RACE),
+                         "ttk", "MIN")
+
     rows = []
     for kill in mine:
         other = base_by_idx.get(kill["idx"])
         rows.append({"idx": kill["idx"], "bot": kill["bot"], "mine": kill["ttk"],
                      "base": other["ttk"] if other else None,
+                     "best": best.get(kill["idx"]),
                      "delta": (kill["ttk"] - other["ttk"]) if other else None})
 
     # How much this bot cost you *over and above how the run went generally*.
@@ -297,12 +355,12 @@ def _race_splits(conn, run, base):
     # Dead time is the gap between bots, not a bot: it is part of the total but
     # it has no place in a ranking of which bot to work on.
     rows.append({"idx": None, "bot": "dead time", "mine": mine_dead,
-                 "base": base_dead, "delta_adj": None,
+                 "base": base_dead, "best": None, "delta_adj": None,
                  "delta": (mine_dead - base_dead) if base_dead is not None else None})
     return rows
 
 
-def _bot_windows(conn, run, base):
+def _bot_windows(conn, run, base, same_cfg=True):
     """Per-bot share of the damage its window made available.
 
     Raw damage is unreadable across scenarios -- 0.009 a window on Plink Palace
@@ -313,10 +371,7 @@ def _bot_windows(conn, run, base):
     kills = index.load_kills(conn, run["id"])
     if not kills:
         return []
-
-    def share(kill):
-        possible = kill["dmg_possible"]
-        return None if not possible else kill["dmg_done"] / possible
+    share = _share
 
     base_by_idx = {}
     if base["pb"]:
@@ -336,6 +391,10 @@ def _bot_windows(conn, run, base):
             if value is not None:
                 recent_by_idx.setdefault(row["idx"], []).append(value)
 
+    # The most of this window anyone has taken, this run included.
+    best = _best_by_slot(conn, _peer_ids(conn, run, same_cfg, shapes.TIMED),
+                         "dmg_done * 1.0 / dmg_possible", "MAX")
+
     rows = []
     for kill in kills:
         mine = share(kill)
@@ -345,7 +404,8 @@ def _bot_windows(conn, run, base):
         recent = sum(pool) / len(pool) if pool else None
         rows.append({
             "idx": kill["idx"], "bot": kill["bot"], "window_s": kill["ttk"],
-            "mine": mine, "base": against, "recent": recent,
+            "mine": mine, "base": against, "best": best.get(kill["idx"]),
+            "recent": recent,
             "delta": None if mine is None or against is None else mine - against,
             "delta_recent": None if mine is None or recent is None else mine - recent,
         })
