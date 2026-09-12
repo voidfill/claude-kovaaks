@@ -61,13 +61,17 @@ new files. The cache is disposable — delete it and it rebuilds.
 
 **It never writes to the KovaaK's install.**
 
-Two things worth knowing about the data:
+Three things worth knowing about the data:
 
 - KovaaK's writes a `.perf` time-series alongside most runs, but not all — runs
   without one still appear, just without a curve.
 - Runs are only compared against runs at the same true sensitivity (cm/360), since
   comparing across a sens change is not a fair comparison. Toggle it off in the UI if
   you want to compare anyway.
+- Not every scenario is scored on a clock. Some spawn a fixed number of bots and
+  score you on how long you took (`score = 1000 - elapsed`). Those are charted
+  against share of the damage pool rather than seconds, so bot boundaries line up
+  between runs, and the delta chart reads in seconds gained or lost.
 
 ## Layout
 
