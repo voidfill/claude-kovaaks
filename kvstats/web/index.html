@@ -74,7 +74,7 @@
 
     <section class="panel" id="panel-delta">
       <div class="panel-head">
-        <h2 class="panel-title">Cumulative Δ vs baseline <span class="unit">score</span></h2>
+        <h2 class="panel-title">Cumulative Δ vs baseline <span class="unit" id="deltaUnit">score</span></h2>
         <div class="legend">
           <span class="chip"><i class="sw sw-up"></i>ahead</span>
           <span class="chip"><i class="sw sw-down"></i>behind</span>
@@ -85,8 +85,13 @@
       <div class="chart-empty" id="deltaEmpty" hidden></div>
     </section>
 
+    <section class="panel" id="splitPanel" hidden>
+      <div class="panel-head"><h2 class="panel-title">Splits <span class="unit" id="splitSub"></span></h2></div>
+      <div class="table-wrap"><table id="splitTable"></table></div>
+    </section>
+
     <div class="controls" id="controls">
-      <div class="ctl">
+      <div class="ctl" id="ctlMetricGroup">
         <span class="ctl-k">metric</span>
         <div class="seg" id="ctlMetric" role="radiogroup" aria-label="metric"></div>
       </div>

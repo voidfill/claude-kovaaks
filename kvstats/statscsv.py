@@ -2,8 +2,8 @@
 
 The file is three blocks, not a CSV table: a per-kill matrix, a `Key:,Value`
 summary, and a `Key:,Value` settings snapshot. Only lines whose key ends in ':'
-are pairs; everything else is a kill row and is skipped -- v1 does not consume
-per-kill data.
+are pairs; everything else is a kill row, consumed separately by
+`parse_kills` rather than by the summary parser below.
 """
 
 import os
@@ -20,6 +20,29 @@ FILENAME = re.compile(
     r"(?P<h>\d{2})\.(?P<mi>\d{2})\.(?P<s>\d{2}) Stats\.csv$"
 )
 
+# Kill rows are the leading block of the file: a header line, then one line per
+# kill. They are positional, not keyed, so the column order below is the
+# contract. Verified against a real install: 124 distinct bot names, 16 weapons.
+# The file's own `Kill #` column (fields[0]) is NOT used as the row's index --
+# "Happy Easter!" writes 0 on every row, which would collide on a PRIMARY KEY
+# (run_id, idx). File order is what every consumer actually wants anyway (the
+# split table pairs a run's Nth kill against the baseline's Nth kill).
+_KILL_COLUMNS = 13
+_CLOCK = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)$")
+
+
+def _clock_seconds(text):
+    match = _CLOCK.match(text.strip())
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _seconds(text):
+    return _number(text.strip().rstrip("s"), float)
+
+
 _FLOATS = {
     "Score": "score",
     "Damage Done": "damage_done",
@@ -29,6 +52,7 @@ _FLOATS = {
     "Sens Increment": "sens_increment",
     "FOV": "fov",
     "Avg FPS": "avg_fps",
+    "Damage Taken": "damage_taken",
 }
 _INTS = {
     "Kills": "kills",
@@ -36,6 +60,8 @@ _INTS = {
     "Miss Count": "misses",
     "Pause Count": "pause_count",
     "DPI": "dpi",
+    "Total Overshots": "overshots",
+    "Reloads": "reloads",
 }
 _STRINGS = {
     "Scenario": "scenario",
@@ -79,6 +105,53 @@ def _number(text, cast):
         return None
 
 
+def parse_kills(path):
+    """The per-kill block, with `t` as seconds from Challenge Start.
+
+    Returns [] for the ~46% of runs whose bots are invincible and never die.
+    The clock in these rows is wall time with no date, so it is rebased onto
+    Challenge Start; a run that crosses midnight would otherwise go negative.
+    """
+    rows, start = [], None
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            key, sep, value = line.partition(",")
+            if sep and key == "Challenge Start:":
+                start = _clock_seconds(value)
+                continue
+            if sep and key.endswith(":"):
+                continue
+            fields = line.rstrip("\n").split(",")
+            if len(fields) < _KILL_COLUMNS or not fields[0].isdigit():
+                continue
+            rows.append(fields)
+
+    if start is None:
+        return []
+
+    kills = []
+    for position, fields in enumerate(rows, start=1):
+        at = _clock_seconds(fields[1])
+        if at is None:
+            continue
+        offset = at - start
+        if offset < 0:
+            offset += 86400  # the run crossed midnight
+        kills.append({
+            "idx": position,
+            "t": offset,
+            "bot": fields[2],
+            "weapon": fields[3],
+            "ttk": _seconds(fields[4]),
+            "shots": _number(fields[5], int),
+            "hits": _number(fields[6], int),
+            "dmg_done": _number(fields[8], float),
+            "dmg_possible": _number(fields[9], float),
+            "overshots": _number(fields[12], int),
+        })
+    return kills
+
+
 def parse(path):
     row = {key: None for key in
            list(_FLOATS.values()) + list(_INTS.values()) + list(_STRINGS.values())}
@@ -103,6 +176,11 @@ def parse(path):
     hits, misses = row["hits"], row["misses"]
     row["shots"] = (hits + misses) if hits is not None and misses is not None else None
     row["accuracy"] = (hits / row["shots"]) if row["shots"] else None
+
+    # Elapsed is the CSV's own answer, not the .perf's: it is exact, it works on
+    # the ~1-in-7 runs with no .perf, and for a race scenario it IS the score.
+    kills = parse_kills(path)
+    row["elapsed_s"] = kills[-1]["t"] if kills else None
 
     # damage_possible is not a summary key; it is only in the per-weapon block.
     # The curve carries it, so leave it None here rather than guessing.

@@ -89,5 +89,49 @@ class Parse(unittest.TestCase):
         self.assertNotIn("1", click)
 
 
+class PerKillRows(unittest.TestCase):
+    """The per-kill table was discarded in v1. It is the only exact source of
+    kill times -- the .perf buckets to whole seconds, which lands kill marks up
+    to 0.6 s off."""
+
+    def test_kill_rows_carry_exact_times_and_reconcile_to_fight_time(self):
+        kills = statscsv.parse_kills(fixture("Air Pure Medium - Challenge - 2026.09.03"))
+        self.assertEqual(len(kills), 5)
+        self.assertEqual([k["idx"] for k in kills], [1, 2, 3, 4, 5])
+        self.assertEqual([k["bot"] for k in kills],
+                         ["AIR1_Short_close", "AIR1_Short_far", "AIR2_Long3D_mid",
+                          "AIR2_Short_close", "AIR2_Mid_UFO"])
+        self.assertEqual([k["overshots"] for k in kills], [25, 25, 25, 25, 0])
+        # sum(TTK) is Fight Time exactly -- the respawn gaps sit outside it
+        self.assertAlmostEqual(sum(k["ttk"] for k in kills), 92.808, places=2)
+        # t is seconds from Challenge Start, and the last kill ends the run
+        self.assertAlmostEqual(kills[0]["t"], 15.735, places=3)
+        self.assertAlmostEqual(kills[-1]["t"], 93.849, places=3)
+
+    def test_a_pure_tracking_run_has_no_kill_rows(self):
+        """1090 of 2360 real runs are invincible-tracking and never kill
+        anything. An empty kill table is the normal case, not an edge case."""
+        kills = statscsv.parse_kills(fixture("Air Voltaic Invincible 4 Medium"))
+        self.assertEqual(kills, [])
+
+    def test_summary_gains_elapsed_and_the_unsurfaced_counters(self):
+        row = statscsv.parse(fixture("Air Pure Medium - Challenge - 2026.09.03"))
+        self.assertAlmostEqual(row["elapsed_s"], 93.849, places=3)
+        self.assertEqual(row["overshots"], 100)
+        self.assertEqual(row["reloads"], 0)
+        self.assertEqual(row["damage_taken"], 0.0)
+        # the identity the whole race shape rests on
+        self.assertAlmostEqual(row["score"] + row["elapsed_s"], 1000.0, places=1)
+
+    def test_kill_number_zero_on_every_row_does_not_collapse_the_index(self):
+        """"Happy Easter!" writes `Kill #` = 0 on every kill row -- a real bug
+        found against the full corpus, not a hypothetical. `idx` must come
+        from file order, not the game's own counter, or two kills collide on
+        the same index."""
+        kills = statscsv.parse_kills(fixture("Happy Easter!"))
+        self.assertEqual(len(kills), 2)
+        self.assertEqual([k["idx"] for k in kills], [1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()

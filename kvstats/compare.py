@@ -9,6 +9,7 @@ headline number cannot disagree.
 import statistics
 
 from . import index
+from . import shapes
 
 DEFAULT_RECENT_N = 10
 DURATION_TOLERANCE = 0.10
@@ -87,6 +88,68 @@ def band(curves):
     return {"mean": mean, "lo": lo, "hi": hi}
 
 
+# 40 cells per bot: 200-320 points against the ~60-125 native one-second
+# buckets, so the grid never invents detail the source cannot support, and
+# every kill boundary lands on an exact index rather than between two.
+RACE_STEPS_PER_BOT = 40
+
+
+def race_grid(bots):
+    return max(1, int(bots or 1)) * RACE_STEPS_PER_BOT
+
+
+def resample_race(hits, elapsed_s, steps):
+    """(edges, rate) on a uniform cumulative-damage grid.
+
+    `edges[k]` is the time at which the run had done `k/steps` of the damage
+    pool; `rate[k]` is the damage per second within cell k. Indexing by damage
+    rather than by seconds is what makes two runs comparable: kill k always
+    sits at damage `k * pool/bots`, so the boundaries coincide in every run.
+    """
+    cumulative, total = [], 0.0
+    for value in hits:
+        total += value
+        cumulative.append(total)
+    if not cumulative or total <= 0 or not elapsed_s:
+        return [], []
+
+    def time_at(target):
+        previous = 0.0
+        for i, reached in enumerate(cumulative):
+            if reached >= target:
+                span = reached - previous
+                # bucket i covers [i, i+1); interpolate inside it
+                return i + ((target - previous) / span if span > 0 else 0.0)
+            previous = reached
+        return float(len(cumulative))
+
+    edges = [time_at(total * k / steps) for k in range(steps + 1)]
+    # Anchor to the CSV's elapsed. The curve is bucketed to whole seconds, so
+    # its own last edge is a rounded approximation -- and for a race that error
+    # would land straight in the score difference.
+    span = edges[-1]
+    if span > 0:
+        edges = [e / span * elapsed_s for e in edges]
+
+    cell = total / steps
+    rate = [cell / max(edges[k + 1] - edges[k], 1e-6) for k in range(steps)]
+    return edges, rate
+
+
+def race_delta(mine_edges, base_edges):
+    """Seconds gained (+) or lost (-) against the baseline, by progress.
+
+    The final value is `base_elapsed - mine_elapsed`, which for a race is the
+    score difference to within the CSV's timestamp resolution (+-0.02 s). It
+    is not exact the way `cumulative_delta` is on the timed path: elapsed is
+    derived from a kill timestamp printed to three decimals, while `score`
+    carries the game's own full-precision clock, so the two disagree in the
+    last digit or two -- 0.0057 s on the real fixture pair.
+    """
+    n = min(len(mine_edges), len(base_edges))
+    return [base_edges[i] - mine_edges[i] for i in range(1, n)]
+
+
 def _focus(conn, run_id):
     row = conn.execute("SELECT * FROM run WHERE id=?", (run_id,)).fetchone()
     if row is None:
@@ -94,7 +157,8 @@ def _focus(conn, run_id):
     return row
 
 
-def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE):
+def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE,
+               shape=shapes.TIMED):
     """Other runs of the same scenario that this run can fairly be judged against."""
     focus = _focus(conn, run_id)
     sql = "SELECT * FROM run WHERE scenario=? AND id<>?"
@@ -105,7 +169,10 @@ def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE):
     rows = conn.execute(sql + " ORDER BY started_at", args).fetchall()
 
     target = focus["duration_s"]
-    if target:
+    # Duration is the score on a race scenario, so filtering baselines by it
+    # throws away the comparison. On the slowest real Air Pure Medium run the
+    # +-10% floor is 84.9 s, which excludes its own 81.2 s PB.
+    if target and shape != shapes.RACE:
         keep = []
         for row in rows:
             # Unknown duration means no .perf. Such a run still counts toward
@@ -119,14 +186,15 @@ def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE):
 
 
 def baselines(conn, run_id, recent_n=DEFAULT_RECENT_N, same_cfg=True,
-              duration_tol=DURATION_TOLERANCE):
+              duration_tol=DURATION_TOLERANCE, shape=shapes.TIMED):
     focus = _focus(conn, run_id)
-    rows = candidates(conn, run_id, same_cfg=same_cfg, duration_tol=duration_tol)
+    rows = candidates(conn, run_id, same_cfg=same_cfg, duration_tol=duration_tol,
+                      shape=shape)
 
     result = {
         "pb": None,
         "true_pb": None,
-        "recent": {"n": 0, "mean_score": None, "curve": None},
+        "recent": {"n": 0, "mean_score": None, "curve": None, "run_ids": None},
         "candidates": len(rows),
     }
     if not rows:
@@ -163,9 +231,19 @@ def baselines(conn, run_id, recent_n=DEFAULT_RECENT_N, same_cfg=True,
         result["recent"]["n"] = len(recent)
         result["recent"]["mean_score"] = statistics.fmean(
             [r["score"] for r in recent if r["score"] is not None] or [0.0])
-        curves = [index.load_curve(conn, r["id"]) for r in recent
-                  if r["perf_file"] is not None]
-        curves = [c for c in curves if c]
+        # Build ids alongside curves, in the same pass, so the two lists stay
+        # index-aligned -- a race curve must later be resampled against its
+        # own run's elapsed_s, not the focused run's, or a slow run looks
+        # normal once rescaled onto someone else's clock.
+        curves, run_ids = [], []
+        for r in recent:
+            if r["perf_file"] is None:
+                continue
+            curve = index.load_curve(conn, r["id"])
+            if curve:
+                curves.append(curve)
+                run_ids.append(r["id"])
         if curves:
             result["recent"]["curve"] = curves
+            result["recent"]["run_ids"] = run_ids
     return result

@@ -83,7 +83,8 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .view[hidden]{display:none}
 .run-view{display:grid; grid-template-columns:minmax(0,1fr) var(--rail); min-height:0}
 .stage{
-  display:grid; grid-template-rows:auto minmax(190px,1.55fr) minmax(120px,1fr) auto;
+  /* headline · rate · delta · splits · controls */
+  display:grid; grid-template-rows:auto minmax(190px,1.55fr) minmax(120px,1fr) auto auto;
   min-height:0; min-width:0; padding:var(--pad); gap:14px;
   overflow-y:auto; overflow-x:hidden;
   container:stage / inline-size;
@@ -94,7 +95,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   display:grid; gap:6px 28px; align-items:end;
   grid-template-columns:minmax(0,1fr) auto auto;
   grid-template-areas:"id delta score" "stats stats stats";
-  padding-bottom:14px; border-bottom:1px solid var(--line);
+  padding-bottom:11px; border-bottom:1px solid var(--line);
 }
 .hl-id{grid-area:id; min-width:22ch}
 .scenario{
@@ -106,25 +107,34 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 
 .hl-delta{grid-area:delta; text-align:right; color:var(--dim); min-width:0}
 .delta-figure{display:flex; align-items:baseline; justify-content:flex-end; gap:.28em; line-height:.95}
-.delta-figure .arrow{font-size:clamp(20px,2.4vw,30px)}
-.delta-figure .num{font-size:clamp(44px,min(6.4vw,10cqw),86px); font-weight:500; letter-spacing:-0.035em}
-.delta-sub{margin-top:7px; font:400 12px/1 var(--mono); color:var(--faint); letter-spacing:.01em}
+/* The delta and the score are the headline, but they were sized like a
+   scoreboard: at full width the figure alone stood 86px tall and the charts
+   below it are what the run is actually read from. Roughly two thirds of
+   the old scale keeps the hierarchy and gives the height back. */
+.delta-figure .arrow{font-size:clamp(14px,1.6vw,20px)}
+.delta-figure .num{font-size:clamp(30px,min(4.2vw,6.6cqw),54px); font-weight:500; letter-spacing:-0.035em}
+.delta-sub{margin-top:5px; font:400 11.5px/1 var(--mono); color:var(--faint); letter-spacing:.01em}
 .hl-delta[data-sign="up"]{color:var(--good)}
 .hl-delta[data-sign="down"]{color:var(--bad)}
 .hl-delta[data-sign="none"] .delta-figure .num{color:var(--ghost)}
 
 .hl-score{grid-area:score; text-align:right; padding-left:26px; border-left:1px solid var(--line)}
-.hl-score .k{font:400 10.5px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--faint)}
-.hl-score .v{font-size:clamp(26px,3.2vw,42px); font-weight:500; letter-spacing:-0.02em; margin-top:6px}
+.hl-score .k{font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--faint)}
+.hl-score .v{font-size:clamp(21px,2.4vw,30px); font-weight:500; letter-spacing:-0.02em; margin-top:5px}
 
 .hl-stats{
-  grid-area:stats; margin:8px 0 0; display:grid; gap:1px;
-  grid-template-columns:repeat(8,minmax(0,1fr));
+  /* One row whatever the count. The cells are not a fixed set: overshots,
+     reloads and damage taken join only on the runs that have them, and a
+     fixed eight-column template put the ninth on a row of its own with seven
+     empty cells beside it -- a band of nothing between the score and the
+     chart that wanted the height. */
+  grid-area:stats; margin:7px 0 0; display:grid; gap:1px;
+  grid-auto-flow:column; grid-auto-columns:minmax(0,1fr);
   background:var(--line); border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
 }
-.hl-stats .cell{background:var(--bg); padding:7px 10px 8px}
-.hl-stats dt{font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em; color:var(--faint)}
-.hl-stats dd{margin:5px 0 0; font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:15px; color:var(--ink)}
+.hl-stats .cell{background:var(--bg); padding:6px 9px 7px; min-width:0}
+.hl-stats dt{font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.hl-stats dd{margin:5px 0 0; font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:14px; color:var(--ink); white-space:nowrap}
 .hl-stats dd small{color:var(--faint); font-size:11px}
 
 .headline[data-state="nohistory"] .hl-delta,
@@ -146,14 +156,21 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   .delta-figure{justify-content:flex-start}
   .hl-score{padding-left:0; border-left:0}
 }
-@container stage (max-width:900px){ .hl-stats{grid-template-columns:repeat(4,minmax(0,1fr))} }
-@container stage (max-width:460px){ .hl-stats{grid-template-columns:repeat(2,minmax(0,1fr))} }
+/* Too narrow for one row: go back to wrapping, where the empty tail costs
+   less than cells too thin to read. */
+@container stage (max-width:900px){
+  .hl-stats{grid-auto-flow:row; grid-template-columns:repeat(4,minmax(0,1fr))}
+}
+@container stage (max-width:460px){
+  .hl-stats{grid-auto-flow:row; grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 
 /* ── panels / charts ─────────────────────────────────────── */
 .panel{
   display:grid; grid-template-rows:auto minmax(0,1fr); min-height:0; overflow:hidden;
   background:var(--bg-panel); border:1px solid var(--line); border-radius:var(--r);
 }
+.panel[hidden]{display:none}
 .panel-head{
   display:flex; align-items:center; gap:16px; flex-wrap:wrap;
   padding:9px 12px; border-bottom:1px solid var(--line);
@@ -195,6 +212,43 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .u-select{background:color-mix(in oklab,var(--band) 12%,transparent)}
 .u-over{cursor:crosshair}
 
+/* ── split table ─────────────────────────────────────────── */
+#splitTable{border-collapse:collapse; width:100%; min-width:520px}
+#splitTable th,#splitTable td{
+  padding:6px 22px; text-align:right; border-bottom:1px solid var(--line);
+  font-family:var(--mono); font-size:12.5px;
+  font-variant-numeric:tabular-nums lining-nums;
+}
+/* The wrap has no padding of its own, so the outer cells carry the panel's
+   inset -- 12px, the same as .panel-head, so BOT lines up under SPLITS. */
+#splitTable th:first-child,#splitTable td:first-child{padding-left:12px}
+#splitTable th:last-child,#splitTable td:last-child{padding-right:12px}
+#splitTable th{
+  font-weight:500; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--faint); border-bottom-color:var(--line-2);
+}
+#splitTable th:first-child,#splitTable td:first-child{text-align:left}
+#splitTable td.bot{color:var(--ink); white-space:nowrap}
+
+/* The bar column absorbs every pixel the numbers do not need, and the bar
+   fills it: a capped track just moves the dead space from the right of the
+   panel to the right of the bar. */
+#splitTable th,#splitTable td{white-space:nowrap}
+#splitTable th.barh,#splitTable td.barc{text-align:left; width:100%; padding:6px 22px 6px 4px}
+#splitTable .bar{
+  display:block; height:9px; border-radius:2px;
+  background:var(--bg-raise); box-shadow:inset 0 0 0 1px var(--line);
+}
+#splitTable .bar i{display:block; height:100%; border-radius:2px; background:var(--dim)}
+#splitTable .bar.up i{background:var(--bad)}
+#splitTable .bar.dn i{background:var(--good)}
+/* Dead time is real elapsed but not anyone's fault -- present, not accused. */
+#splitTable .bar.dead i{background:var(--ghost)}
+#splitTable tbody tr:hover td{background:var(--bg-raise)}
+#splitTable tr.w td:first-child{box-shadow:inset 2px 0 0 var(--bad)}
+#splitTable .up{color:var(--bad)}
+#splitTable .dn{color:var(--good)}
+
 /* ── controls ────────────────────────────────────────────── */
 .controls{
   display:flex; align-items:center; gap:20px; flex-wrap:wrap;
@@ -202,6 +256,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   color:var(--faint);
 }
 .ctl{display:flex; align-items:center; gap:9px}
+.ctl[hidden]{display:none}   /* display:flex would otherwise outrank [hidden] */
 .ctl-k{font:400 10.5px/1 var(--mono); text-transform:uppercase; letter-spacing:.13em; color:var(--faint)}
 .controls:hover .ctl-k{color:var(--dim)}
 .seg{display:flex; border:1px solid var(--line); border-radius:var(--r); overflow:hidden}
@@ -265,6 +320,16 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .run[data-pb="1"]{border-left-color:var(--pb)}
 .run[data-pb="1"] .sc{color:var(--pb)}
 .run[data-nocurve="1"] .t::after{content:"·"; margin-left:4px; color:var(--ghost)}
+/* Both markers want the same pseudo-element, and 20 of the 146 real race runs
+   are also curveless. The dot wins there: it is what explains the missing
+   chart, and the shape is still called out in the scenarios table. The rail's
+   .name is ellipsised at ~23 characters, so it cannot carry the badge. */
+.run[data-shape="race"][data-nocurve="0"] .t::after,
+#scenTable tr[data-shape="race"] .name::after{
+  content:"race"; margin-left:6px; padding:1px 4px; border-radius:2px;
+  font-size:9px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--pb); border:1px solid color-mix(in oklab,var(--pb) 40%,var(--line-2));
+}
 .run[data-sign="up"] .d{color:var(--good)}
 .run[data-sign="down"] .d{color:var(--bad)}
 .run[aria-selected="true"]{background:var(--bg-raise); border-left-color:var(--ink)}
@@ -311,7 +376,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   html,body{height:auto}
   body{overflow:visible; grid-template-rows:auto auto; min-height:100%}
   .run-view{grid-template-columns:minmax(0,1fr); min-height:0}
-  .stage{grid-template-rows:auto auto auto auto}
+  .stage{grid-template-rows:auto auto auto auto auto}
   .sheet{overflow:visible}
   .chart{height:250px} .chart-sm{height:150px}
   .rail{border-left:0; border-top:1px solid var(--line); grid-template-rows:auto auto auto}

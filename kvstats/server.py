@@ -14,7 +14,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import compare, index, watch
+from . import compare, index, shapes, watch
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -70,6 +70,23 @@ def _series(curve, metric):
     return _ratio(list(curve[top]), list(curve[bottom]))
 
 
+def _usable_metrics(curve):
+    """Which metric buttons are worth offering for this run.
+
+    Damage is booked per tick on some scenarios and only at kill time on
+    others. Where it is per-kill, dmg_possible is a couple of units against
+    thousands of shots, and `efficiency` draws a flat zero -- so it is
+    withheld rather than shown as though it were a measurement.
+    """
+    usable = [name for name in METRICS if name != "efficiency"]
+    if curve:
+        possible = sum(curve["dmg_possible"])
+        shots = sum(curve["shots"])
+        if possible > 0 and possible >= 0.5 * shots:
+            usable.append("efficiency")
+    return usable
+
+
 def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
                       same_cfg=True):
     if metric not in METRICS:
@@ -86,65 +103,193 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
         raise KeyError(run_id)
     run = {key: row[key] for key in row.keys()}
 
+    scen_row = index.scenario_row(conn, run["scenario"])
+    scenario = ({key: scen_row[key] for key in scen_row.keys()} if scen_row else
+                {"name": run["scenario"], "shape": shapes.TIMED, "penalising": 0,
+                 "budget": None, "pool": None, "bots": None, "clock_s": None,
+                 "evidence": "default"})
+    is_race = scenario["shape"] == shapes.RACE
+
     curve = index.load_curve(conn, run_id)
     run["buckets"] = len(curve["score"]) if curve else 0
+    # A race plots damage/s whatever `metric` says -- the shape fixes the y
+    # series, so every one of the six buttons would redraw the identical line.
+    # No button at all is the honest offer; `metric` stays a valid METRICS key
+    # on the query string so that switching back to a timed run still works.
+    payload_metrics = [] if is_race else _usable_metrics(curve)
 
-    mine = _series(curve, metric) if curve else []
+    base = compare.baselines(conn, run_id, recent_n=recent_n, same_cfg=same_cfg,
+                             shape=scenario["shape"])
     payload = {
         "run": run,
-        "metric": metric,
-        "curve": compare.smooth(mine, smoothing),
-        "cumulative_delta": None,
-        "compare_until": None,
-        "delta_baseline": None,
-        "pb_curve": None,
-        "recent_band": None,
-        "baselines": {},
-    }
-
-    base = compare.baselines(conn, run_id, recent_n=recent_n, same_cfg=same_cfg)
-    payload["baselines"] = {
-        "true_pb": base["true_pb"],
-        "candidates": base["candidates"],
-        "recent_n": base["recent"]["n"],
-        "recent_mean_score": base["recent"]["mean_score"],
-        "pb": None if not base["pb"] else {
-            "run_id": base["pb"]["run_id"],
-            "score": base["pb"]["score"],
-            "started_at": base["pb"]["started_at"],
-            "is_true_pb": base["pb"]["is_true_pb"],
+        "scenario": scenario,
+        "metrics": payload_metrics,
+        "axis": {"kind": "time", "label": "seconds", "n": run["buckets"]},
+        "rate": {"metric": metric, "unit": metric, "mine": [], "pb": None,
+                 "band": None},
+        "delta": {"unit": "points", "values": None, "final": None,
+                  "compare_until": None, "baseline": None},
+        "marks": {"kills": [], "labels": [], "aligned": False},
+        "splits": [],
+        "baselines": {
+            "true_pb": base["true_pb"],
+            "candidates": base["candidates"],
+            "recent_n": base["recent"]["n"],
+            "recent_mean_score": base["recent"]["mean_score"],
+            "pb": None if not base["pb"] else {
+                "run_id": base["pb"]["run_id"], "score": base["pb"]["score"],
+                "started_at": base["pb"]["started_at"],
+                "is_true_pb": base["pb"]["is_true_pb"]},
         },
     }
 
+    if is_race:
+        _fill_race(conn, payload, run, scenario, curve, base, smoothing)
+    else:
+        _fill_timed(conn, payload, run, curve, base, metric, smoothing)
+    return payload
+
+
+def _fill_timed(conn, payload, run, curve, base, metric, smoothing):
+    """The existing behaviour, unchanged: native per-second grid, score units."""
+    mine = _series(curve, metric) if curve else []
+    payload["rate"]["mine"] = compare.smooth(mine, smoothing)
+    payload["marks"]["kills"] = [k["t"] for k in index.load_kills(conn, run["id"])]
+
     if curve and base["pb"] and base["pb"]["curve"]:
         pb_curve = base["pb"]["curve"]
-        payload["pb_curve"] = compare.smooth(_series(pb_curve, metric), smoothing)
-
-        # The delta chart is ALWAYS in score units, whatever metric the top
-        # chart shows -- a running sum of per-second accuracy differences is a
-        # meaningless quantity, and the spec specifies score units. It is also
-        # computed on the RAW series: smoothing would blur the invariant that
-        # the final value equals the score difference exactly.
-        payload["cumulative_delta"] = compare.cumulative_delta(
+        payload["rate"]["pb"] = compare.smooth(_series(pb_curve, metric), smoothing)
+        # Always score units, and always on the RAW series: smoothing would blur
+        # the invariant that the final value equals the score difference.
+        values = compare.cumulative_delta(
             list(curve["score"]), list(pb_curve["score"]))
-        payload["compare_until"] = compare.compare_until(
-            list(curve["score"]), list(pb_curve["score"]))
+        payload["delta"].update({
+            "values": values, "final": values[-1] if values else None,
+            "compare_until": compare.compare_until(
+                list(curve["score"]), list(pb_curve["score"]))})
         # What the delta is measured against, so the UI cannot label the chart
         # with one baseline and the headline percentage with another.
-        payload["delta_baseline"] = {
-            "run_id": base["pb"]["run_id"],
-            "score": base["pb"]["score"],
-            "is_true_pb": base["pb"]["is_true_pb"],
-        }
+        payload["delta"]["baseline"] = {
+            "run_id": base["pb"]["run_id"], "score": base["pb"]["score"],
+            "is_true_pb": base["pb"]["is_true_pb"]}
 
     if curve and base["recent"]["curve"]:
-        recent_series = [_series(c, metric) for c in base["recent"]["curve"]]
-        raw_band = compare.band(recent_series)
-        payload["recent_band"] = {
-            key: compare.smooth(values, smoothing)
-            for key, values in raw_band.items()
-        }
-    return payload
+        raw = compare.band([_series(c, metric) for c in base["recent"]["curve"]])
+        payload["rate"]["band"] = {k: compare.smooth(v, smoothing)
+                                   for k, v in raw.items()}
+
+
+def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
+    """Progress axis, damage rate, seconds-based delta, shared kill marks."""
+    bots = scenario["bots"] or 1
+    steps = compare.race_grid(bots)
+    payload["axis"] = {"kind": "progress", "label": "% of pool", "n": steps}
+    payload["rate"].update({"metric": "damage", "unit": "dmg/s"})
+    payload["delta"]["unit"] = "seconds"
+    # Kill k always lands at damage k*pool/bots, so the marks are the same for
+    # every run of the scenario -- which is the whole point of this axis.
+    payload["marks"] = {"kills": [(i + 1) / bots for i in range(bots)],
+                        "labels": [], "aligned": True}
+
+    mine_edges = []
+    if curve and run["elapsed_s"]:
+        mine_edges, rate = compare.resample_race(
+            list(curve["hits"]), run["elapsed_s"], steps)
+        payload["rate"]["mine"] = compare.smooth(rate, smoothing)
+
+    pb_run = None
+    if base["pb"] and base["pb"]["curve"]:
+        pb_run = conn.execute("SELECT elapsed_s FROM run WHERE id=?",
+                              (base["pb"]["run_id"],)).fetchone()
+    if mine_edges and pb_run and pb_run["elapsed_s"]:
+        base_edges, base_rate = compare.resample_race(
+            list(base["pb"]["curve"]["hits"]), pb_run["elapsed_s"], steps)
+        payload["rate"]["pb"] = compare.smooth(base_rate, smoothing)
+        values = compare.race_delta(mine_edges, base_edges)
+        payload["delta"].update({
+            "values": values, "final": values[-1] if values else None,
+            # Both runs span the whole pool by definition, so there is no
+            # region where only one of them has data.
+            "compare_until": 1.0})
+        payload["delta"]["baseline"] = {
+            "run_id": base["pb"]["run_id"], "score": base["pb"]["score"],
+            "is_true_pb": base["pb"]["is_true_pb"]}
+
+    if mine_edges and base["recent"]["curve"]:
+        curves = []
+        # Each recent run is resampled against its OWN elapsed_s, not the
+        # focused run's: scaling every band member onto someone else's clock
+        # moves a real Air Pure Medium run by up to ~15%, hiding a slow run
+        # inside a band that looks normal.
+        for recent, recent_id in zip(base["recent"]["curve"], base["recent"]["run_ids"]):
+            recent_run = conn.execute("SELECT elapsed_s FROM run WHERE id=?",
+                                      (recent_id,)).fetchone()
+            if not recent_run or not recent_run["elapsed_s"]:
+                continue
+            _, recent_rate = compare.resample_race(
+                list(recent["hits"]), recent_run["elapsed_s"], steps)
+            if recent_rate:
+                curves.append(recent_rate)
+        if curves:
+            raw = compare.band(curves)
+            payload["rate"]["band"] = {k: compare.smooth(v, smoothing)
+                                       for k, v in raw.items()}
+
+    payload["splits"] = _race_splits(conn, run, base)
+    # Name the boundaries after the bots that hold them, reusing the rows the
+    # split table already loaded. A run that quit early names fewer bots than
+    # the scenario has; the chart falls back to the ordinal for the rest.
+    payload["marks"]["labels"] = [split["bot"] for split in payload["splits"]
+                                  if split["idx"] is not None][:bots]
+
+
+def _race_splits(conn, run, base):
+    """Per-bot rows plus the dead-time residual, so the table reconciles.
+
+    Dead time is not modelled as a scenario constant: it is stable within a
+    game version but moved by up to a second across versions, so it is carried
+    as this run's own residual and simply shown.
+    """
+    mine = index.load_kills(conn, run["id"])
+    if not mine or not run["elapsed_s"]:
+        return []
+    base_by_idx = {}
+    if base["pb"]:
+        base_by_idx = {k["idx"]: k for k in index.load_kills(conn, base["pb"]["run_id"])}
+
+    rows = []
+    for kill in mine:
+        other = base_by_idx.get(kill["idx"])
+        rows.append({"idx": kill["idx"], "bot": kill["bot"], "mine": kill["ttk"],
+                     "base": other["ttk"] if other else None,
+                     "delta": (kill["ttk"] - other["ttk"]) if other else None})
+
+    # How much this bot cost you *over and above how the run went generally*.
+    # A plain delta against the PB ranks the bots you find hard; subtracting
+    # the run's own mean delta takes the bad-day component out and leaves the
+    # bot that actually broke ranks. Sums to zero across the bots by
+    # construction, which is what makes it readable as "better or worse than
+    # the rest of this run".
+    deltas = [row["delta"] for row in rows if row["delta"] is not None]
+    mean_delta = sum(deltas) / len(deltas) if deltas else None
+    for row in rows:
+        row["delta_adj"] = (None if row["delta"] is None or mean_delta is None
+                            else row["delta"] - mean_delta)
+
+    mine_dead = run["elapsed_s"] - sum(k["ttk"] for k in mine)
+    base_dead = None
+    if base_by_idx:
+        base_run = conn.execute("SELECT elapsed_s FROM run WHERE id=?",
+                                (base["pb"]["run_id"],)).fetchone()
+        if base_run and base_run["elapsed_s"]:
+            base_dead = base_run["elapsed_s"] - sum(
+                k["ttk"] for k in base_by_idx.values())
+    # Dead time is the gap between bots, not a bot: it is part of the total but
+    # it has no place in a ranking of which bot to work on.
+    rows.append({"idx": None, "bot": "dead time", "mine": mine_dead,
+                 "base": base_dead, "delta_adj": None,
+                 "delta": (mine_dead - base_dead) if base_dead is not None else None})
+    return rows
 
 
 def _rows(conn, sql, args=()):
@@ -230,10 +375,6 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                     "scenarios": one_row("SELECT COUNT(DISTINCT scenario) FROM run"),
                     "awaiting_perf": len(watcher.stats["awaiting_perf"]) if watcher else 0,
                     "watcher_errors": watcher.stats["errors"] if watcher else 0,
-                    # A real install has one run recording FOV 1.1. Junk like
-                    # that should be visible, not silently averaged in.
-                    "suspect_fov": one_row(
-                        "SELECT COUNT(*) FROM run WHERE fov IS NOT NULL AND fov < 10"),
                 })
 
             # buckets comes from the curve table, not run: the run list marks
@@ -251,19 +392,27 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                     return self._json(_rows(
                         conn,
                         "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                        "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets "
+                        "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
+                        "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
                         "FROM run WHERE scenario=? ORDER BY started_at DESC LIMIT ?",
                         (scenario, limit)))
                 return self._json(_rows(
                     conn,
                     "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                    "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets "
+                    "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
+                    "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
                     "FROM run ORDER BY started_at DESC LIMIT ?", (limit,)))
 
             if route == "/api/scenarios":
                 return self._json(_rows(conn, """
                     SELECT s.scenario, COUNT(*) AS runs, MAX(s.score) AS pb,
                            MAX(s.started_at) AS last_played,
+                           (SELECT shape FROM scenario WHERE name = s.scenario) AS shape,
+                           (SELECT elapsed_s FROM run r WHERE r.scenario = s.scenario
+                             ORDER BY r.score DESC LIMIT 1) AS pb_elapsed,
+                           (SELECT AVG(elapsed_s) FROM (
+                                SELECT elapsed_s FROM run r WHERE r.scenario = s.scenario
+                                ORDER BY started_at DESC LIMIT 10)) AS recent_elapsed,
                            (SELECT AVG(score) FROM (
                                 SELECT score FROM run r WHERE r.scenario = s.scenario
                                 ORDER BY started_at DESC LIMIT 10)) AS recent_form

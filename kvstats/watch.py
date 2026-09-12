@@ -34,6 +34,18 @@ class Watcher:
         self.stats = {"scans": 0, "ticks": 0, "errors": 0,
                       "awaiting_perf": self._awaiting}
 
+    def _refresh_scenario_for(self, run_id):
+        """Re-classify the scenario this run belongs to.
+
+        Cheap -- a fold over rows already indexed -- and it has to happen live:
+        a second run is exactly what promotes a curveless race scenario out of
+        'timed', and a first .perf is what promotes it via the stronger tier.
+        """
+        row = self.conn.execute(
+            "SELECT scenario FROM run WHERE id=?", (run_id,)).fetchone()
+        if row:
+            index.refresh_scenario(self.conn, row[0])
+
     # -- tier 1 -----------------------------------------------------------
     def _directories_changed(self):
         changed = False
@@ -75,6 +87,7 @@ class Watcher:
             if perf_path:
                 self._awaiting[run_id] = (perf_path, time.monotonic())
             new_ids.append(run_id)
+            self._refresh_scenario_for(run_id)
         return new_ids
 
     def _attach_ready_perfs(self):
@@ -92,6 +105,7 @@ class Watcher:
                 if index.attach_perf(self.conn, run_id, perf_path):
                     del self._awaiting[run_id]
                     attached.append(run_id)
+                    self._refresh_scenario_for(run_id)
                     continue
                 # attach_perf already called record_failure. Stop once the file
                 # has burned its budget -- otherwise a corrupt .perf is
