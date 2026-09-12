@@ -581,11 +581,13 @@ async function refresh(isNew) {
     A.health = await api('/api/health');
     const h = A.health;
     const hEl = $('#health');
-    hEl.hidden = !(h.awaiting_perf || h.watcher_errors || h.failed || h.suspect_fov);
+    // Only states that are actionable or still resolving. Every condition here
+    // must also have a line below it, or the badge shows up saying nothing.
+    hEl.hidden = !(h.awaiting_perf || h.watcher_errors || h.failed);
     hEl.textContent = [
       h.awaiting_perf ? `indexing · ${h.curves}/${h.runs} curves` : '',
       h.watcher_errors ? `${h.watcher_errors} watcher errors` : '',
-      h.suspect_fov ? `${h.suspect_fov} suspect fov` : ''
+      h.failed ? `${h.failed} unreadable files` : ''
     ].filter(Boolean).join('  ·  ');
 
     A.runs = await api('/api/runs?limit=100');

@@ -361,10 +361,6 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                     "scenarios": one_row("SELECT COUNT(DISTINCT scenario) FROM run"),
                     "awaiting_perf": len(watcher.stats["awaiting_perf"]) if watcher else 0,
                     "watcher_errors": watcher.stats["errors"] if watcher else 0,
-                    # A real install has one run recording FOV 1.1. Junk like
-                    # that should be visible, not silently averaged in.
-                    "suspect_fov": one_row(
-                        "SELECT COUNT(*) FROM run WHERE fov IS NOT NULL AND fov < 10"),
                 })
 
             # buckets comes from the curve table, not run: the run list marks
