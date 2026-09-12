@@ -355,9 +355,10 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .table-wrap{overflow:auto}
 .tbl{width:100%; border-collapse:collapse; font-size:12.5px}
 .tbl th{
-  text-align:left; font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em;
+  text-align:right; font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em;
   color:var(--faint); padding:0 10px 7px; border-bottom:1px solid var(--line); white-space:nowrap;
 }
+.tbl th:first-child{text-align:left}          /* the scenario name; every other column is numeric */
 .tbl td{padding:8px 10px; border-bottom:1px solid color-mix(in oklab,var(--line) 60%,transparent); color:var(--dim)}
 .tbl tbody tr{cursor:pointer}
 .tbl tbody tr:hover td{background:var(--bg-panel); color:var(--ink)}
