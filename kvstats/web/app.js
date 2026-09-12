@@ -248,6 +248,9 @@ function renderCharts(p) {
 
   const m = METRICS.find(m => m[0] === p.rate.metric);
   $('#rateUnit').textContent = m ? m[1] : p.rate.unit;
+  // Not a pass-through of delta.unit: the timed payload's own unit is
+  // "points", but the chart has always read "score" there and stays that way.
+  $('#deltaUnit').textContent = p.delta.unit === 'seconds' ? 'seconds' : 'score';
   $('#lgRecentN').textContent = p.baselines.recent_n;
 
   // "PB" overlay may be the best *charted* run instead of the true PB — say so.

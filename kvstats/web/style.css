@@ -154,6 +154,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   display:grid; grid-template-rows:auto minmax(0,1fr); min-height:0; overflow:hidden;
   background:var(--bg-panel); border:1px solid var(--line); border-radius:var(--r);
 }
+.panel[hidden]{display:none}
 .panel-head{
   display:flex; align-items:center; gap:16px; flex-wrap:wrap;
   padding:9px 12px; border-bottom:1px solid var(--line);
