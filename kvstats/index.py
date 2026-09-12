@@ -272,13 +272,23 @@ def refresh_scenario(conn, name, commit=True):
         usable = [v for v in values if v is not None]
         return statistics.median(usable) if usable else None
 
+    def maximum(values):
+        usable = [v for v in values if v is not None]
+        return max(usable) if usable else None
+
     pool = bots = clock_s = None
     penalising = 0
     if verdict["shape"] == shapes.RACE:
         # Hits are the damage pool: every hit is one damage in these scenarios,
-        # and the total is identical in every run of the same scenario.
-        pool = median([r["hits"] for r in runs])
-        bot_count = median([r["kills"] for r in runs])
+        # and the total is identical in every run that ran to the end.
+        #
+        # max, not median: a run quit part-way records fewer kills and fewer
+        # hits, and tier 1 still classifies the scenario race from any one good
+        # curve. With two runs the median is the mean, so a single abort would
+        # halve `bots` and put every kill mark at the wrong fraction. A partial
+        # run can only ever undercount, so max cannot be contaminated by one.
+        pool = maximum([r["hits"] for r in runs])
+        bot_count = maximum([r["kills"] for r in runs])
         bots = int(bot_count) if bot_count is not None else None
     else:
         clock_s = median([r["duration_s"] for r in runs])

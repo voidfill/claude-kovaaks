@@ -112,7 +112,11 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
 
     curve = index.load_curve(conn, run_id)
     run["buckets"] = len(curve["score"]) if curve else 0
-    payload_metrics = _usable_metrics(curve)
+    # A race plots damage/s whatever `metric` says -- the shape fixes the y
+    # series, so every one of the six buttons would redraw the identical line.
+    # No button at all is the honest offer; `metric` stays a valid METRICS key
+    # on the query string so that switching back to a timed run still works.
+    payload_metrics = [] if is_race else _usable_metrics(curve)
 
     base = compare.baselines(conn, run_id, recent_n=recent_n, same_cfg=same_cfg,
                              shape=scenario["shape"])

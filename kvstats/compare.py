@@ -139,9 +139,12 @@ def resample_race(hits, elapsed_s, steps):
 def race_delta(mine_edges, base_edges):
     """Seconds gained (+) or lost (-) against the baseline, by progress.
 
-    The final value is `base_elapsed - mine_elapsed`, which for a race IS the
-    score difference, because score = budget - elapsed. That is the same
-    invariant `cumulative_delta` carries on the timed path.
+    The final value is `base_elapsed - mine_elapsed`, which for a race is the
+    score difference to within the CSV's timestamp resolution (+-0.02 s). It
+    is not exact the way `cumulative_delta` is on the timed path: elapsed is
+    derived from a kill timestamp printed to three decimals, while `score`
+    carries the game's own full-precision clock, so the two disagree in the
+    last digit or two -- 0.0057 s on the real fixture pair.
     """
     n = min(len(mine_edges), len(base_edges))
     return [base_edges[i] - mine_edges[i] for i in range(1, n)]

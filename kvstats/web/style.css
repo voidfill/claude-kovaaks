@@ -83,7 +83,8 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .view[hidden]{display:none}
 .run-view{display:grid; grid-template-columns:minmax(0,1fr) var(--rail); min-height:0}
 .stage{
-  display:grid; grid-template-rows:auto minmax(190px,1.55fr) minmax(120px,1fr) auto;
+  /* headline · rate · delta · splits · controls */
+  display:grid; grid-template-rows:auto minmax(190px,1.55fr) minmax(120px,1fr) auto auto;
   min-height:0; min-width:0; padding:var(--pad); gap:14px;
   overflow-y:auto; overflow-x:hidden;
   container:stage / inline-size;
@@ -223,6 +224,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   color:var(--faint);
 }
 .ctl{display:flex; align-items:center; gap:9px}
+.ctl[hidden]{display:none}   /* display:flex would otherwise outrank [hidden] */
 .ctl-k{font:400 10.5px/1 var(--mono); text-transform:uppercase; letter-spacing:.13em; color:var(--faint)}
 .controls:hover .ctl-k{color:var(--dim)}
 .seg{display:flex; border:1px solid var(--line); border-radius:var(--r); overflow:hidden}
@@ -286,7 +288,11 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .run[data-pb="1"]{border-left-color:var(--pb)}
 .run[data-pb="1"] .sc{color:var(--pb)}
 .run[data-nocurve="1"] .t::after{content:"·"; margin-left:4px; color:var(--ghost)}
-.run[data-shape="race"] .t::after,
+/* Both markers want the same pseudo-element, and 20 of the 146 real race runs
+   are also curveless. The dot wins there: it is what explains the missing
+   chart, and the shape is still called out in the scenarios table. The rail's
+   .name is ellipsised at ~23 characters, so it cannot carry the badge. */
+.run[data-shape="race"][data-nocurve="0"] .t::after,
 #scenTable tr[data-shape="race"] .name::after{
   content:"race"; margin-left:6px; padding:1px 4px; border-radius:2px;
   font-size:9px; letter-spacing:.08em; text-transform:uppercase;
@@ -338,7 +344,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   html,body{height:auto}
   body{overflow:visible; grid-template-rows:auto auto; min-height:100%}
   .run-view{grid-template-columns:minmax(0,1fr); min-height:0}
-  .stage{grid-template-rows:auto auto auto auto}
+  .stage{grid-template-rows:auto auto auto auto auto}
   .sheet{overflow:visible}
   .chart{height:250px} .chart-sm{height:150px}
   .rail{border-left:0; border-top:1px solid var(--line); grid-template-rows:auto auto auto}

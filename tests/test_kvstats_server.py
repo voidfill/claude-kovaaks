@@ -114,13 +114,13 @@ class RunPayload(ServerBase):
             "run_id": pb["run_id"], "score": pb["score"],
             "is_true_pb": pb["is_true_pb"]})
 
-        # No timed scenario in these fixtures has a second run with a curve,
-        # so this is also the real coverage for "no PB curve backs the delta"
-        # -- the exact case the field must fall back to None for.
-        timed = server.build_run_payload(
-            self.conn, self.run_for("VT Ground Intermediate S5"))
-        self.assertIsNone(timed["baselines"]["pb"])
-        self.assertIsNone(timed["delta"]["baseline"])
+        # Pasu Voltaic Reload Easier is fixtured as a single run, so it is the
+        # coverage for "no PB curve backs the delta" -- the exact case the
+        # field must fall back to None for.
+        alone = server.build_run_payload(
+            self.conn, self.run_for("Pasu Voltaic Reload Easier"))
+        self.assertIsNone(alone["baselines"]["pb"])
+        self.assertIsNone(alone["delta"]["baseline"])
 
     def test_efficiency_is_withheld_where_damage_is_only_booked_at_kill_time(self):
         """VT Ground Intermediate S5 books damage at kill time: its whole-run
@@ -129,9 +129,59 @@ class RunPayload(ServerBase):
         booked_at_kill = server.build_run_payload(
             self.conn, self.run_for("VT Ground Intermediate S5"))
         self.assertNotIn("efficiency", booked_at_kill["metrics"])
+        per_tick = server.build_run_payload(
+            self.conn, self.run_for("VT 1w2ts Horizontal Small"))
+        self.assertIn("efficiency", per_tick["metrics"])
+        self.assertIn("accuracy", per_tick["metrics"])
+
+    def test_a_race_run_offers_no_metric_buttons(self):
+        """A race is plotted in damage/s whatever `metric` says, so every one
+        of the six buttons would redraw the same line. The payload has to say
+        so, because the UI offers exactly what `metrics` lists."""
         race = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
-        self.assertIn("efficiency", race["metrics"])
-        self.assertIn("accuracy", race["metrics"])
+        self.assertEqual(race["metrics"], [])
+        self.assertEqual(race["rate"]["metric"], "damage")
+
+        # The proof that the buttons were dead: two different metrics, one
+        # series. `metric` still has to be a METRICS key even so -- the UI
+        # carries the timed run's choice across, and an unknown one would 400
+        # every later request for this run.
+        as_accuracy = server.build_run_payload(
+            self.conn, self.run_for("Air Pure Medium"), metric="accuracy")
+        self.assertEqual(as_accuracy["rate"]["mine"], race["rate"]["mine"])
+        self.assertEqual(as_accuracy["metrics"], [])
+        with self.assertRaises(ValueError):
+            server.build_run_payload(
+                self.conn, self.run_for("Air Pure Medium"), metric="damage")
+
+    def test_a_timed_run_with_a_charted_baseline_gets_a_delta_and_a_band(self):
+        """VT Ground Intermediate S5 is the one fixture scenario with two
+        .perf-backed runs, so it is the only coverage for _fill_timed's
+        pb/delta/band branch -- the most travelled branch in the file.
+
+        The delta's final value must be the score difference exactly: that is
+        the invariant the chart's endpoint and the headline number share.
+        """
+        newer = self.run_for("VT Ground Intermediate S5", "DESC")
+        older = self.run_for("VT Ground Intermediate S5", "ASC")
+        payload = server.build_run_payload(self.conn, newer)
+
+        self.assertEqual(payload["axis"]["kind"], "time")
+        self.assertEqual(len(payload["rate"]["pb"]), payload["run"]["buckets"])
+        self.assertEqual(payload["delta"]["compare_until"], payload["run"]["buckets"])
+
+        scores = dict(self.conn.execute(
+            "SELECT id, score FROM run WHERE id IN (?,?)", (newer, older)))
+        self.assertAlmostEqual(payload["delta"]["final"],
+                               scores[newer] - scores[older], places=6)
+        self.assertEqual(payload["delta"]["values"][-1], payload["delta"]["final"])
+        self.assertEqual(payload["delta"]["baseline"],
+                         {"run_id": older, "score": scores[older], "is_true_pb": True})
+
+        band = payload["rate"]["band"]
+        self.assertIsNotNone(band)
+        for series in ("mean", "lo", "hi"):
+            self.assertEqual(len(band[series]), payload["run"]["buckets"])
 
 
 class LiveServer(ServerBase):
@@ -152,8 +202,8 @@ class LiveServer(ServerBase):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",
                                     timeout=5) as response:
             body = json.loads(response.read())
-        self.assertEqual(body["runs"], 10)
-        self.assertEqual(body["curves"], 6)
+        self.assertEqual(body["runs"], 11)
+        self.assertEqual(body["curves"], 7)
         self.assertEqual(body["watcher_errors"], 0)
 
         run_id = self.conn.execute(

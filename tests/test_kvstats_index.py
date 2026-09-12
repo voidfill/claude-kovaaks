@@ -28,8 +28,8 @@ class IndexBase(unittest.TestCase):
 class Bootstrap(IndexBase):
     def test_indexes_every_csv_attaches_curves_and_never_re_reads(self):
         counts = index.bootstrap(self.conn, self.cfg)
-        self.assertEqual(counts["runs"], 10)   # 6 paired + 4 CSV-only
-        self.assertEqual(counts["curves"], 6)
+        self.assertEqual(counts["runs"], 11)   # 7 paired + 4 CSV-only
+        self.assertEqual(counts["curves"], 7)
 
         # the CSV-only run is still a run, just without a curve
         curveless, = self.conn.execute(
@@ -45,7 +45,7 @@ class Bootstrap(IndexBase):
         again = index.bootstrap(self.conn, self.cfg)
         self.assertEqual(again["runs"], 0, "an indexed file must never be re-read")
         total, = self.conn.execute("SELECT COUNT(*) FROM run").fetchone()
-        self.assertEqual(total, 10)
+        self.assertEqual(total, 11)
 
 
 class Reconciliation(IndexBase):
@@ -73,7 +73,7 @@ class Reconciliation(IndexBase):
 
         second = index.bootstrap(self.conn, self.cfg)
         self.assertEqual(second["runs"], 0, "no new CSVs appeared")
-        self.assertEqual(second["reconciled"], 6)
+        self.assertEqual(second["reconciled"], 7)
         remaining, = self.conn.execute(
             "SELECT COUNT(*) FROM run WHERE perf_file IS NULL").fetchone()
         self.assertEqual(remaining, 4, "only the genuinely perf-less runs stay")
@@ -92,8 +92,8 @@ class Failures(IndexBase):
             handle.write(b"not protobuf")
 
         counts = index.bootstrap(self.conn, self.cfg)
-        self.assertEqual(counts["runs"], 10, "a bad curve must not lose the run")
-        self.assertEqual(counts["curves"], 5)
+        self.assertEqual(counts["runs"], 11, "a bad curve must not lose the run")
+        self.assertEqual(counts["curves"], 6)
 
         for _ in range(index.MAX_TRIES + 3):
             tries = index.record_failure(self.conn, "C:/x/bad.perf", "boom")

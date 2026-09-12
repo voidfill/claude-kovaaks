@@ -195,6 +195,11 @@ class RaceInvariant(unittest.TestCase):
         For a race, score = budget - elapsed, so the seconds one run gains on
         another IS its score advantage. If this drifts, the chart's endpoint
         and the headline number disagree.
+
+        places=6 holds here only because these literals define the score from
+        the same elapsed the delta is built from. On a real pair the two come
+        from different sources -- a three-decimal CSV timestamp against the
+        game's own clock -- and agree to about +-0.02 s, not to six places.
         """
         mine_hits, base_hits = [50.0] * 100, [55.0] * 91
         mine_elapsed, base_elapsed = 93.849, 85.994

@@ -162,6 +162,15 @@ function drawDelta(u) {
   ctx.stroke(); ctx.restore();
 }
 
+/* One rule per kill only reads as a boundary while the rules stay countable.
+   The busiest real run in the fixtures puts 76 of them over a 60-second axis:
+   at ~800 px that is a dashed line every ~10 px across the full plot height,
+   which is hatching rather than information, and on a penalising scenario it
+   buries the zero rule underneath. Past this many, drawing nothing says more.
+   Race marks are exempt: there are at most 8 of them, they are shared between
+   runs and labelled, and they are the point of the progress axis. */
+const MAX_PER_RUN_KILL_MARKS = 12;
+
 /* Kill boundaries. For a race these are shared -- kill k sits at damage
    k*pool/bots in every run -- so they are drawn solid and labelled. For a
    timed run they belong to the focused run alone and are drawn subdued,
@@ -169,6 +178,7 @@ function drawDelta(u) {
 function drawKills(u, p) {
   const marks = p.marks && p.marks.kills;
   if (!marks || !marks.length) return;
+  if (!p.marks.aligned && marks.length > MAX_PER_RUN_KILL_MARKS) return;
   const { top, height } = u.bbox;
   const ctx = u.ctx;
   ctx.save();
@@ -313,10 +323,20 @@ function renderSplits(p) {
   if (panel.hidden) return;
   const worst = p.splits.filter(s => s.idx != null && s.delta > 0)
     .sort((a, b) => b.delta - a.delta).slice(0, 2).map(s => s.idx);
-  const cell = v => v == null ? '—'
-    : `<span class="${v > 0 ? 'up' : v < 0 ? 'dn' : ''}">${signed(v, 2)}</span>`;
+  // Red means worse. Every row above `score` is seconds, where more is worse;
+  // score runs the other way, so it passes worse = -1 to flip the colours.
+  const cell = (v, worse = 1) => v == null ? '—'
+    : `<span class="${v * worse > 0 ? 'up' : v * worse < 0 ? 'dn' : ''}">${signed(v, 2)}</span>`;
   const total = p.splits.reduce((a, s) => a + s.mine, 0);
+  // The baseline's own elapsed is the number the reader most wants beside
+  // their own, and it is already here: its per-bot TTKs plus its dead time.
+  const baseTotal = p.splits.every(s => s.base != null)
+    ? p.splits.reduce((a, s) => a + s.base, 0) : null;
+  const baseScore = p.delta.baseline ? p.delta.baseline.score : null;
   $('#splitSub').textContent = `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`;
+  // Splits + dead = elapsed = budget - score, so the last two rows are the
+  // same quantity read twice and their Δs are each other negated. The "Δ s"
+  // header stays true across both: one second is exactly one point here.
   $('#splitTable').innerHTML =
     `<thead><tr><th></th><th>bot</th><th>this run</th><th>PB</th><th>Δ s</th></tr></thead><tbody>` +
     p.splits.map(s => `<tr class="${worst.includes(s.idx) ? 'w' : ''}">
@@ -324,7 +344,11 @@ function renderSplits(p) {
       <td class="bot">${s.bot}</td><td>${num(s.mine, 2)}</td>
       <td>${num(s.base, 2)}</td><td>${cell(s.delta)}</td></tr>`).join('') +
     `<tr class="tot"><td class="idx"></td><td class="bot">total elapsed</td>
-       <td>${num(total, 2)}</td><td>—</td><td>—</td></tr></tbody>`;
+       <td>${num(total, 2)}</td><td>${num(baseTotal, 2)}</td>
+       <td>${cell(baseTotal == null ? null : total - baseTotal)}</td></tr>
+     <tr><td class="idx"></td><td class="bot">score</td>
+       <td>${num(p.run.score, 2)}</td><td>${num(baseScore, 2)}</td>
+       <td>${cell(baseScore == null ? null : p.run.score - baseScore, -1)}</td></tr></tbody>`;
 }
 
 /* ═══════════════════════════ HEADLINE ═════════════════════ */
@@ -511,9 +535,16 @@ async function loadRun(id, isNew) {
   const c = A.ctrl;
   const p = await api(`/api/run/${id}?metric=${c.metric}&smoothing=${c.smoothing}&recent_n=${c.recent_n}&same_cfg=${c.same_cfg ? 1 : 0}`);
   if (!p) return;
+  // Fall back only onto a metric this run actually offers, and only when that
+  // is a different one. A race offers none at all -- its y series is fixed by
+  // the shape -- and re-fetching with the same metric that was just rejected
+  // would recurse until the tab dies.
   if (p.metrics && !p.metrics.includes(A.ctrl.metric)) {
-    A.ctrl.metric = 'score';
-    return loadRun(id, isNew);   // one re-fetch, then render
+    const fallback = p.metrics.includes('score') ? 'score' : p.metrics[0];
+    if (fallback && fallback !== A.ctrl.metric) {
+      A.ctrl.metric = fallback;
+      return loadRun(id, isNew);   // one re-fetch, then render
+    }
   }
   A.payload = p; A.focusedId = id;
   buildSegs();
@@ -573,6 +604,10 @@ async function refresh(isNew) {
 /* ═══════════════════════════ CONTROLS ═════════════════════ */
 function buildSegs() {
   const usable = (A.payload && A.payload.metrics) || METRICS.map(m => m[0]);
+  // An empty list is a real answer, not a missing one: a race is plotted in
+  // damage/s whichever metric is asked for, so the whole picker goes away
+  // rather than standing there offering six buttons that redraw one line.
+  $('#ctlMetricGroup').hidden = !usable.length;
   $('#ctlMetric').innerHTML = METRICS.filter(([k]) => usable.includes(k)).map(([k, l]) =>
     `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.metric === k}">${k}</button>`).join('');
   $('#ctlSmooth').innerHTML = SMOOTH.map(([k, l]) =>
