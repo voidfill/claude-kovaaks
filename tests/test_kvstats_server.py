@@ -54,6 +54,24 @@ class RunPayload(ServerBase):
         for i, mark in enumerate(payload["marks"]["kills"], start=1):
             self.assertAlmostEqual(mark, i / 5, places=6)
 
+    def test_race_marks_are_named_after_the_bots_that_hold_them(self):
+        """A boundary is only meaningful if you can tell which bot it ends.
+        The names come from the same rows the split table uses, so the chart
+        and the table can never disagree about which bot is which."""
+        payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        self.assertEqual(payload["marks"]["labels"],
+                         ["AIR1_Short_close", "AIR1_Short_far", "AIR2_Long3D_mid",
+                          "AIR2_Short_close", "AIR2_Mid_UFO"])
+        self.assertEqual(payload["marks"]["labels"],
+                         [s["bot"] for s in payload["splits"] if s["idx"] is not None])
+
+    def test_a_timed_run_carries_no_mark_labels(self):
+        """Timed marks are the focused run's own kills, drawn subdued and
+        unlabelled -- there is no shared boundary for a name to describe."""
+        payload = server.build_run_payload(
+            self.conn, self.run_for("Air Voltaic Invincible 4 Medium"))
+        self.assertEqual(payload["marks"]["labels"], [])
+
     def test_race_splits_reconcile_to_the_score(self):
         payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
         bots = [s for s in payload["splits"] if s["idx"] is not None]

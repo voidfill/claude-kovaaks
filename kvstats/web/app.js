@@ -171,6 +171,18 @@ function drawDelta(u) {
    runs and labelled, and they are the point of the progress axis. */
 const MAX_PER_RUN_KILL_MARKS = 12;
 
+/* Longest prefix of `text` that fits `max` px in the context's current font,
+   with an ellipsis when it had to cut. Returns '' when nothing fits. */
+function ellipsize(ctx, text, max) {
+  if (max <= 0) return '';
+  if (ctx.measureText(text).width <= max) return text;
+  for (let n = text.length - 1; n > 0; n--) {
+    const cut = text.slice(0, n) + '…';
+    if (ctx.measureText(cut).width <= max) return cut;
+  }
+  return '';
+}
+
 /* Kill boundaries. For a race these are shared -- kill k sits at damage
    k*pool/bots in every run -- so they are drawn solid and labelled. For a
    timed run they belong to the focused run alone and are drawn subdued,
@@ -193,7 +205,14 @@ function drawKills(u, p) {
       ctx.fillStyle = C.faint;
       ctx.font = '9.5px ' + css('--mono');
       ctx.textAlign = 'right';
-      ctx.fillText('bot ' + (i + 1), x - 4, top + 11);
+      // The bot's own name, which is what the stretch before this rule was
+      // spent on. Real names run to 18 characters against a gap that is only
+      // a fifth of the plot, so they are trimmed to what the gap holds and
+      // dropped entirely when it holds nothing legible -- the rule still
+      // marks the boundary, and the split table carries every full name.
+      const name = (p.marks.labels && p.marks.labels[i]) || 'bot ' + (i + 1);
+      const previous = i ? u.valToPos(marks[i - 1], 'x', true) : u.bbox.left;
+      ctx.fillText(ellipsize(ctx, name, x - previous - 8), x - 4, top + 11);
     }
   });
   ctx.restore();

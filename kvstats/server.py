@@ -129,7 +129,7 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
                  "band": None},
         "delta": {"unit": "points", "values": None, "final": None,
                   "compare_until": None, "baseline": None},
-        "marks": {"kills": [], "aligned": False},
+        "marks": {"kills": [], "labels": [], "aligned": False},
         "splits": [],
         "baselines": {
             "true_pb": base["true_pb"],
@@ -189,7 +189,7 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
     # Kill k always lands at damage k*pool/bots, so the marks are the same for
     # every run of the scenario -- which is the whole point of this axis.
     payload["marks"] = {"kills": [(i + 1) / bots for i in range(bots)],
-                        "aligned": True}
+                        "labels": [], "aligned": True}
 
     mine_edges = []
     if curve and run["elapsed_s"]:
@@ -236,6 +236,11 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
                                        for k, v in raw.items()}
 
     payload["splits"] = _race_splits(conn, run, base)
+    # Name the boundaries after the bots that hold them, reusing the rows the
+    # split table already loaded. A run that quit early names fewer bots than
+    # the scenario has; the chart falls back to the ordinal for the rest.
+    payload["marks"]["labels"] = [split["bot"] for split in payload["splits"]
+                                  if split["idx"] is not None][:bots]
 
 
 def _race_splits(conn, run, base):
