@@ -279,7 +279,7 @@ def refresh_scenario(conn, name, commit=True):
         # and the total is identical in every run of the same scenario.
         pool = median([r["hits"] for r in runs])
         bot_count = median([r["kills"] for r in runs])
-        bots = int(bot_count) if bot_count else None
+        bots = int(bot_count) if bot_count is not None else None
     else:
         clock_s = median([r["duration_s"] for r in runs])
         # A countdown is negative every bucket by construction; that is the
