@@ -123,6 +123,15 @@ class PerKillRows(unittest.TestCase):
         # the identity the whole race shape rests on
         self.assertAlmostEqual(row["score"] + row["elapsed_s"], 1000.0, places=1)
 
+    def test_kill_number_zero_on_every_row_does_not_collapse_the_index(self):
+        """"Happy Easter!" writes `Kill #` = 0 on every kill row -- a real bug
+        found against the full corpus, not a hypothetical. `idx` must come
+        from file order, not the game's own counter, or two kills collide on
+        the same index."""
+        kills = statscsv.parse_kills(fixture("Happy Easter!"))
+        self.assertEqual(len(kills), 2)
+        self.assertEqual([k["idx"] for k in kills], [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -152,7 +152,7 @@ class LiveServer(ServerBase):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",
                                     timeout=5) as response:
             body = json.loads(response.read())
-        self.assertEqual(body["runs"], 9)
+        self.assertEqual(body["runs"], 10)
         self.assertEqual(body["curves"], 6)
         self.assertEqual(body["watcher_errors"], 0)
 

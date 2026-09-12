@@ -28,13 +28,13 @@ class IndexBase(unittest.TestCase):
 class Bootstrap(IndexBase):
     def test_indexes_every_csv_attaches_curves_and_never_re_reads(self):
         counts = index.bootstrap(self.conn, self.cfg)
-        self.assertEqual(counts["runs"], 9)   # 6 paired + 3 CSV-only
+        self.assertEqual(counts["runs"], 10)   # 6 paired + 4 CSV-only
         self.assertEqual(counts["curves"], 6)
 
         # the CSV-only run is still a run, just without a curve
         curveless, = self.conn.execute(
             "SELECT COUNT(*) FROM run WHERE perf_file IS NULL").fetchone()
-        self.assertEqual(curveless, 3)
+        self.assertEqual(curveless, 4)
 
         # spm is derived only where a curve gave us a duration
         score, duration, spm = self.conn.execute(
@@ -45,7 +45,7 @@ class Bootstrap(IndexBase):
         again = index.bootstrap(self.conn, self.cfg)
         self.assertEqual(again["runs"], 0, "an indexed file must never be re-read")
         total, = self.conn.execute("SELECT COUNT(*) FROM run").fetchone()
-        self.assertEqual(total, 9)
+        self.assertEqual(total, 10)
 
 
 class Reconciliation(IndexBase):
@@ -76,7 +76,7 @@ class Reconciliation(IndexBase):
         self.assertEqual(second["reconciled"], 6)
         remaining, = self.conn.execute(
             "SELECT COUNT(*) FROM run WHERE perf_file IS NULL").fetchone()
-        self.assertEqual(remaining, 3, "only the genuinely perf-less runs stay")
+        self.assertEqual(remaining, 4, "only the genuinely perf-less runs stay")
 
 
 class Failures(IndexBase):
@@ -92,7 +92,7 @@ class Failures(IndexBase):
             handle.write(b"not protobuf")
 
         counts = index.bootstrap(self.conn, self.cfg)
-        self.assertEqual(counts["runs"], 9, "a bad curve must not lose the run")
+        self.assertEqual(counts["runs"], 10, "a bad curve must not lose the run")
         self.assertEqual(counts["curves"], 5)
 
         for _ in range(index.MAX_TRIES + 3):
@@ -183,6 +183,25 @@ class ScenarioShapes(unittest.TestCase):
         run = self.conn.execute(
             "SELECT id FROM run WHERE scenario='Air Voltaic Invincible 4 Medium'").fetchone()
         self.assertEqual(index.load_kills(self.conn, run["id"]), [])
+
+    def test_kill_number_zero_on_every_row_does_not_fail_the_insert(self):
+        """"Happy Easter!" writes `Kill #` = 0 on every row. A parser that
+        trusted that column would hand two rows the same idx, the `kill`
+        table's PRIMARY KEY (run_id, idx) would raise UNIQUE constraint
+        failed on the second INSERT, and bootstrap's per-file except would
+        quietly record the run as failed with only its first kill stored. A
+        test that only covers the parser would not catch this -- the crash
+        happens at the INSERT."""
+        failed = {row[0] for row in
+                  self.conn.execute("SELECT path FROM failed").fetchall()}
+        self.assertEqual(failed, set())
+
+        run = self.conn.execute(
+            "SELECT id FROM run WHERE scenario='Happy Easter!'").fetchone()
+        self.assertIsNotNone(run, "the run itself must still be indexed")
+        kills = index.load_kills(self.conn, run["id"])
+        self.assertEqual(len(kills), 2)
+        self.assertEqual([k["idx"] for k in kills], [1, 2])
 
 
 if __name__ == "__main__":

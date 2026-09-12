@@ -23,6 +23,10 @@ FILENAME = re.compile(
 # Kill rows are the leading block of the file: a header line, then one line per
 # kill. They are positional, not keyed, so the column order below is the
 # contract. Verified against a real install: 124 distinct bot names, 16 weapons.
+# The file's own `Kill #` column (fields[0]) is NOT used as the row's index --
+# "Happy Easter!" writes 0 on every row, which would collide on a PRIMARY KEY
+# (run_id, idx). File order is what every consumer actually wants anyway (the
+# split table pairs a run's Nth kill against the baseline's Nth kill).
 _KILL_COLUMNS = 13
 _CLOCK = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)$")
 
@@ -126,7 +130,7 @@ def parse_kills(path):
         return []
 
     kills = []
-    for fields in rows:
+    for position, fields in enumerate(rows, start=1):
         at = _clock_seconds(fields[1])
         if at is None:
             continue
@@ -134,7 +138,7 @@ def parse_kills(path):
         if offset < 0:
             offset += 86400  # the run crossed midnight
         kills.append({
-            "idx": int(fields[0]),
+            "idx": position,
             "t": offset,
             "bot": fields[2],
             "weapon": fields[3],
@@ -145,7 +149,6 @@ def parse_kills(path):
             "dmg_possible": _number(fields[9], float),
             "overshots": _number(fields[12], int),
         })
-    kills.sort(key=lambda k: k["idx"])
     return kills
 
 
