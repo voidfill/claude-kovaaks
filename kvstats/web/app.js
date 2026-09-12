@@ -46,6 +46,59 @@ const A = {
   filterScenario: null, health: null
 };
 
+/* ── chart controls persist locally ──────────────────────── */
+// The hash carries what you would link to — view, run, scenario filter. The
+// chart controls are a reading preference, so they live here instead of
+// cluttering every URL. Stored values are re-validated on the way in: a stale
+// or hand-edited key must not be able to send garbage to the API.
+const CTRL_KEY = 'kvstats.ctrl';
+function loadCtrl() {
+  let s;
+  try { s = JSON.parse(localStorage.getItem(CTRL_KEY) || 'null'); } catch (_) { return; }
+  if (!s || typeof s !== 'object') return;
+  const c = A.ctrl;
+  if (METRICS.some(m => m[0] === s.metric)) c.metric = s.metric;
+  if (SMOOTH.some(w => w[0] === +s.smoothing)) c.smoothing = +s.smoothing;
+  if (isFinite(+s.recent_n)) c.recent_n = clamp(Math.round(+s.recent_n), 1, 50);
+  if (typeof s.same_cfg === 'boolean') c.same_cfg = s.same_cfg;
+}
+function saveCtrl() {
+  try { localStorage.setItem(CTRL_KEY, JSON.stringify(A.ctrl)); } catch (_) {}
+}
+
+/* ── hash routing ────────────────────────────────────────── */
+/* #/run · #/run/<id> · #/run/<id>?scenario=<name> · #/session · #/scenarios */
+const VIEWS = ['run', 'session', 'scenarios'];
+
+function parseHash() {
+  const [path, qs] = location.hash.replace(/^#\/?/, '').split('?');
+  const seg = path.split('/').filter(Boolean);
+  const view = VIEWS.includes(seg[0]) ? seg[0] : 'run';
+  return {
+    view,
+    runId: view === 'run' && /^\d+$/.test(seg[1] || '') ? +seg[1] : null,
+    scenario: new URLSearchParams(qs || '').get('scenario') || null
+  };
+}
+
+function formatHash({ view, runId, scenario }) {
+  if (view !== 'run') return '#/' + view;                 // the rail is run-view state
+  return '#/run' + (runId == null ? '' : '/' + runId) +
+         (scenario ? '?scenario=' + encodeURIComponent(scenario) : '');
+}
+
+/* Patch the current route and navigate. Assigning location.hash fires
+   hashchange, so applyRoute stays the one place that acts on a route.
+   replace = true writes the URL without a history entry — and without firing
+   hashchange — for movement the user did not ask for: normalising a bad URL,
+   arrowing down the rail, a new run landing over SSE. */
+function go(patch, replace) {
+  const next = formatHash({ view: A.view, runId: A.focusedId, scenario: A.filterScenario, ...patch });
+  if (next === location.hash) return;
+  if (replace) history.replaceState(null, '', next);
+  else location.hash = next;
+}
+
 /* ── fetch layer ─────────────────────────────────────────── */
 async function api(path) {
   const r = await fetch(API + path);
@@ -592,6 +645,29 @@ async function loadRun(id, isNew) {
   renderRunList(isNew ? id : null);
 }
 
+/* The one place a route is acted on: the hash decides the view, the focused
+   run and the rail filter, and nothing else writes those three. */
+async function applyRoute(isNew) {
+  const r = parseHash();
+  if (r.view === 'run') A.filterScenario = r.scenario;   // the filter is run-view state,
+  setView(r.view);                                       // so a sheet route leaves it alone
+
+  if (!A.runs.length) { A.payload = null; A.focusedId = null; renderRunList(); return; }
+
+  // A sheet route names no run, so the run view keeps the one it had. A new run
+  // over SSE always takes focus — this is a live dashboard, and a deep link is a
+  // starting point rather than a pin. Anything unknown falls back to the newest.
+  let id = r.view === 'run' ? r.runId : A.focusedId;
+  if (isNew || id == null || !A.runs.some(x => x.id === id)) id = A.runs[0].id;
+  go({ view: r.view, runId: id }, true);                 // URL now names what is shown
+
+  if (isNew || !A.payload || id !== A.focusedId) await loadRun(id, isNew);
+  else renderRunList();                                  // same run, new filter or view
+  A.kbd = $$('.run', $('#runlist')).findIndex(el => +el.dataset.id === id);
+}
+
+addEventListener('hashchange', () => applyRoute(false));
+
 async function refresh(isNew) {
   // Every SSE message lands here with nothing above it to catch a rejection.
   // Without this the page would sit on stale data after a failed request and
@@ -630,12 +706,8 @@ async function refresh(isNew) {
       $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
       $('#deltaEmpty').innerHTML = '<span>—</span>';
       $('#splitPanel').hidden = true;
-      renderRunList();
-      return;
     }
-    const focus = (isNew || !A.focusedId || !A.runs.some(r => r.id === A.focusedId)) ? A.runs[0].id : A.focusedId;
-    A.kbd = A.runs.findIndex(r => r.id === focus);
-    await loadRun(focus, isNew);
+    await applyRoute(isNew);
   } catch (err) {
     setStatus('down', 'api error');
   }
@@ -653,15 +725,18 @@ function buildSegs() {
   $('#ctlSmooth').innerHTML = SMOOTH.map(([k, l]) =>
     `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.smoothing === k}">${l}</button>`).join('');
 }
+loadCtrl();
 buildSegs();
+$('#ctlRecent').value = A.ctrl.recent_n;
+$('#ctlSameCfg').checked = A.ctrl.same_cfg;
 
 $('#ctlMetric').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  A.ctrl.metric = b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+  A.ctrl.metric = b.dataset.v; buildSegs(); saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
 });
 $('#ctlSmooth').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  A.ctrl.smoothing = +b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+  A.ctrl.smoothing = +b.dataset.v; buildSegs(); saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
 });
 $('.stepper').addEventListener('click', e => {
   const b = e.target.closest('button[data-step]'); if (!b) return;
@@ -672,14 +747,15 @@ $('.stepper').addEventListener('click', e => {
 $('#ctlRecent').addEventListener('change', e => {
   A.ctrl.recent_n = clamp(+e.target.value || 10, 1, 50);
   e.target.value = A.ctrl.recent_n;
+  saveCtrl();
   if (A.focusedId) loadRun(A.focusedId);
 });
 $('#ctlSameCfg').addEventListener('change', e => {
-  A.ctrl.same_cfg = e.target.checked; if (A.focusedId) loadRun(A.focusedId);
+  A.ctrl.same_cfg = e.target.checked; saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
 });
 
 /* views */
-$$('.vtab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
+$$('.vtab').forEach(t => t.addEventListener('click', () => go({ view: t.dataset.view })));
 function setView(v) {
   A.view = v;
   $$('.vtab').forEach(t => t.setAttribute('aria-selected', t.dataset.view === v));
@@ -691,28 +767,29 @@ function setView(v) {
   if (v === 'run' && uRate) ro.disconnect(), ro.observe($('#chartRate')), ro.observe($('#chartDelta'));
 }
 
-/* run list interaction */
+/* run list interaction — these navigate, and applyRoute does the work */
 $('#runlist').addEventListener('click', e => {
   const li = e.target.closest('.run'); if (!li) return;
-  A.kbd = +li.dataset.i; loadRun(+li.dataset.id);
+  go({ runId: +li.dataset.id });
 });
-$('#railFilter').addEventListener('click', () => { A.filterScenario = null; renderRunList(); });
+$('#railFilter').addEventListener('click', () => go({ scenario: null }));
 
 $('#sessionTable').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-run]'); if (!tr) return;
-  setView('run'); loadRun(+tr.dataset.run);
+  // the run picked here can belong to a scenario the rail is filtering out
+  go({ view: 'run', runId: +tr.dataset.run, scenario: null });
 });
 $('#scenTable').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-scenario]'); if (!tr) return;
-  A.filterScenario = tr.dataset.scenario; setView('run');
-  const first = A.runs.find(r => r.scenario === A.filterScenario);
-  if (first) loadRun(first.id); else renderRunList();
+  const name = tr.dataset.scenario;
+  const first = A.runs.find(r => r.scenario === name);
+  go({ view: 'run', scenario: name, runId: first ? first.id : A.focusedId });
 });
 
 /* keyboard: ↑↓ through runs, ⏎ focus, Esc back to the run view */
 document.addEventListener('keydown', e => {
   if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
-  if (A.view !== 'run') { if (e.key === 'Escape') setView('run'); return; }
+  if (A.view !== 'run') { if (e.key === 'Escape') go({ view: 'run' }); return; }
   const items = $$('.run', $('#runlist'));
   if (!items.length) return;
   const move = d => {
@@ -720,13 +797,15 @@ document.addEventListener('keydown', e => {
     items.forEach(el => el.classList.remove('kbd'));
     const el = items[A.kbd]; el.classList.add('kbd');
     $('#runlist').scrollTop = clamp(el.offsetTop - $('#runlist').clientHeight / 2, 0, $('#runlist').scrollHeight);
+    // arrowing is a scrub, not a destination — keep it out of the back stack
+    go({ runId: +el.dataset.id }, true);
     loadRun(+el.dataset.id);
   };
   if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
   else if (e.key === 'Home') { e.preventDefault(); A.kbd = 0; move(0); }
   else if (e.key === 'End') { e.preventDefault(); A.kbd = items.length - 1; move(0); }
-  else if (e.key === 'Enter') { const el = items[clamp(A.kbd, 0, items.length - 1)]; if (el) loadRun(+el.dataset.id); }
+  else if (e.key === 'Enter') { const el = items[clamp(A.kbd, 0, items.length - 1)]; if (el) go({ runId: +el.dataset.id }); }
 });
 
 /* ═══════════════════════════ SSE ══════════════════════════ */
