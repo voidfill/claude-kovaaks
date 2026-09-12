@@ -30,41 +30,77 @@ class ServerBase(unittest.TestCase):
 
 
 class RunPayload(ServerBase):
-    def run_id_with_curve(self):
+    def run_for(self, scenario, order="ASC"):
         return self.conn.execute(
-            "SELECT id FROM run WHERE perf_file IS NOT NULL LIMIT 1").fetchone()[0]
+            f"SELECT id FROM run WHERE scenario=? AND perf_file IS NOT NULL "
+            f"ORDER BY score {order} LIMIT 1", (scenario,)).fetchone()[0]
 
-    def test_payload_is_serialisable_and_carries_run_curve_and_baselines(self):
-        payload = server.build_run_payload(self.conn, self.run_id_with_curve())
-        json.dumps(payload)   # arrays must already be plain lists, not array.array
-        self.assertIn("run", payload)
-        self.assertIn("curve", payload)
-        self.assertIn("baselines", payload)
-        self.assertEqual(len(payload["curve"]), payload["run"]["buckets"])
+    def test_payload_is_serialisable_and_carries_the_shape(self):
+        payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        json.dumps(payload)   # arrays must be plain lists, not array.array
+        for key in ("run", "scenario", "axis", "rate", "delta", "marks",
+                    "splits", "baselines"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["scenario"]["shape"], "race")
 
-        # a curveless run is a normal case, not an error
-        curveless = self.conn.execute(
-            "SELECT id FROM run WHERE perf_file IS NULL").fetchone()[0]
-        payload = server.build_run_payload(self.conn, curveless)
-        self.assertEqual(payload["curve"], [])
-        self.assertIsNone(payload["cumulative_delta"])
+    def test_a_race_run_is_indexed_by_progress_with_shared_kill_marks(self):
+        payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        self.assertEqual(payload["axis"]["kind"], "progress")
+        self.assertEqual(payload["axis"]["n"], 200)
+        self.assertEqual(payload["delta"]["unit"], "seconds")
+        self.assertEqual(payload["rate"]["metric"], "damage")
+        self.assertTrue(payload["marks"]["aligned"])
+        self.assertEqual(len(payload["marks"]["kills"]), 5)
+        for i, mark in enumerate(payload["marks"]["kills"], start=1):
+            self.assertAlmostEqual(mark, i / 5, places=6)
 
-    def test_the_delta_is_raw_score_units_whatever_the_view_controls_say(self):
-        """The chart controls must not be able to change the headline number.
+    def test_race_splits_reconcile_to_the_score(self):
+        payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        bots = [s for s in payload["splits"] if s["idx"] is not None]
+        dead = [s for s in payload["splits"] if s["idx"] is None]
+        self.assertEqual(len(bots), 5)
+        self.assertEqual(len(dead), 1)
+        total = sum(s["mine"] for s in payload["splits"])
+        self.assertAlmostEqual(total, payload["run"]["elapsed_s"], places=6)
+        budget = payload["scenario"]["budget"]
+        self.assertAlmostEqual(total, budget - payload["run"]["score"], places=1)
 
-        Smoothing is a display choice, and a running sum of per-second accuracy
-        differences is meaningless -- so the delta is computed on raw score in
-        both cases, however the curve above it is drawn.
-        """
-        run_id = self.run_id_with_curve()
-        raw = server.build_run_payload(self.conn, run_id, smoothing=1)
-        smoothed = server.build_run_payload(self.conn, run_id, smoothing=5)
-        self.assertEqual(len(raw["curve"]), len(smoothed["curve"]))
-        self.assertEqual(raw["cumulative_delta"], smoothed["cumulative_delta"])
+    def test_a_timed_run_keeps_its_per_second_axis(self):
+        payload = server.build_run_payload(
+            self.conn, self.run_for("Air Voltaic Invincible 4 Medium"))
+        self.assertEqual(payload["axis"]["kind"], "time")
+        self.assertEqual(payload["delta"]["unit"], "points")
+        self.assertFalse(payload["marks"]["aligned"])
+        self.assertEqual(payload["splits"], [])
 
-        by_accuracy = server.build_run_payload(self.conn, run_id, metric="accuracy")
-        self.assertNotEqual(raw["curve"], by_accuracy["curve"])
-        self.assertEqual(raw["cumulative_delta"], by_accuracy["cumulative_delta"])
+    def test_a_penalising_scenario_is_flagged(self):
+        payload = server.build_run_payload(
+            self.conn, self.run_for("VT 1w2ts Horizontal Small"))
+        self.assertTrue(payload["scenario"]["penalising"])
+        self.assertEqual(payload["axis"]["kind"], "time")
+
+    def test_a_race_run_with_no_perf_still_emits_splits(self):
+        """Air Spectral Easy is race via csv-constant-budget and has no .perf
+        at all -- the rate/delta stay empty, but the splits still come from
+        the kill rows, which is the whole point of the race path here."""
+        run_id = self.conn.execute(
+            "SELECT id FROM run WHERE scenario=? ORDER BY score LIMIT 1",
+            ("Air Spectral Easy",)).fetchone()[0]
+        payload = server.build_run_payload(self.conn, run_id)
+        self.assertEqual(payload["scenario"]["shape"], "race")
+        self.assertEqual(payload["rate"]["mine"], [])
+        self.assertIsNone(payload["delta"]["values"])
+
+    def test_efficiency_is_withheld_where_damage_is_only_booked_at_kill_time(self):
+        """VT Ground Intermediate S5 books damage at kill time: its whole-run
+        dmg_possible is 6.0 against 6001 shots, so a per-second ratio is a flat
+        zero pretending to be a measurement."""
+        booked_at_kill = server.build_run_payload(
+            self.conn, self.run_for("VT Ground Intermediate S5"))
+        self.assertNotIn("efficiency", booked_at_kill["metrics"])
+        race = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        self.assertIn("efficiency", race["metrics"])
+        self.assertIn("accuracy", race["metrics"])
 
 
 class LiveServer(ServerBase):
@@ -94,7 +130,9 @@ class LiveServer(ServerBase):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/run/{run_id}",
                                     timeout=5) as response:
             payload = json.loads(response.read())
-        self.assertEqual(len(payload["curve"]), payload["run"]["buckets"])
+        # This particular run is race-shaped (Air Pure Medium), so its rate
+        # axis is indexed by progress steps, not by second-buckets.
+        self.assertEqual(len(payload["rate"]["mine"]), payload["axis"]["n"])
 
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
             self.assertEqual(response.status, 200)
