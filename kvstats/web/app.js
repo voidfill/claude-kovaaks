@@ -557,7 +557,9 @@ function renderRunList(newId) {
   if (sel) ol.scrollTop = clamp(sel.offsetTop - ol.clientHeight / 2, 0, ol.scrollHeight);
 
   const pbMark = focused ? list.filter(r => r.scenario === focused.scenario).length : 0;
-  $('#railFoot').innerHTML = `${list.length} runs · ${pbMark} of this scenario · ↑↓ to move, ⏎ to focus`;
+  $('#railFoot').innerHTML = A.filterScenario
+    ? `${list.length} runs · ↑↓ to move, esc to clear`
+    : `${list.length} runs · ${pbMark} of this scenario · ↑↓ to move, ⏎ to filter`;
 }
 
 /* ═══════════════════════════ SHEETS ═══════════════════════ */
@@ -786,10 +788,14 @@ $('#scenTable').addEventListener('click', e => {
   go({ view: 'run', scenario: name, runId: first ? first.id : A.focusedId });
 });
 
-/* keyboard: ↑↓ through runs, ⏎ focus, Esc back to the run view */
+/* keyboard: ↑↓ through runs, ⏎ filter the rail by scenario, Esc clear it
+   (Esc backs out of a sheet view instead, where there is no rail) */
 document.addEventListener('keydown', e => {
   if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (A.view !== 'run') { if (e.key === 'Escape') go({ view: 'run' }); return; }
+  // Ahead of the empty-list guard: a filter matching nothing leaves no items
+  // to move through, and that is exactly when you most want to clear it.
+  if (e.key === 'Escape') { if (A.filterScenario) go({ scenario: null }); return; }
   const items = $$('.run', $('#runlist'));
   if (!items.length) return;
   const move = d => {
@@ -805,7 +811,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
   else if (e.key === 'Home') { e.preventDefault(); A.kbd = 0; move(0); }
   else if (e.key === 'End') { e.preventDefault(); A.kbd = items.length - 1; move(0); }
-  else if (e.key === 'Enter') { const el = items[clamp(A.kbd, 0, items.length - 1)]; if (el) go({ runId: +el.dataset.id }); }
+  else if (e.key === 'Enter') { const r = A.runs.find(x => x.id === A.focusedId); if (r) go({ scenario: r.scenario }); }
 });
 
 /* ═══════════════════════════ SSE ══════════════════════════ */
