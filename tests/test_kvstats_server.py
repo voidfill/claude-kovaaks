@@ -83,6 +83,42 @@ class RunPayload(ServerBase):
         budget = payload["scenario"]["budget"]
         self.assertAlmostEqual(total, budget - payload["run"]["score"], places=1)
 
+    def test_split_deltas_are_offered_against_the_run_as_well_as_the_pb(self):
+        """Which bot to work on is not the same question as which bot is hard.
+
+        This run is 1.57 s per bot behind its baseline on average. Against the
+        mean the picture is one bot, not five: AIR2_Mid_UFO is +6.70 over the
+        run's own shortfall and every other bot comes in under it. The plain
+        delta cannot say that -- it only reports that four bots were near the
+        baseline and one was 8 s off, leaving the reader to do the subtraction.
+        """
+        payload = server.build_run_payload(self.conn, self.run_for("Air Pure Medium"))
+        bots = [s for s in payload["splits"] if s["idx"] is not None]
+        adjusted = {s["bot"]: s["delta_adj"] for s in bots}
+        self.assertAlmostEqual(adjusted["AIR2_Mid_UFO"], 6.697, places=2)
+        self.assertAlmostEqual(adjusted["AIR2_Long3D_mid"], -2.674, places=2)
+        self.assertEqual(max(adjusted, key=adjusted.get), "AIR2_Mid_UFO")
+        # Zero-sum is what makes the column readable as "against the rest of
+        # this run" rather than as a second, differently-scaled delta.
+        self.assertAlmostEqual(sum(adjusted.values()), 0.0, places=6)
+        self.assertEqual(len([v for v in adjusted.values() if v > 0]), 1)
+
+        dead = [s for s in payload["splits"] if s["idx"] is None][0]
+        self.assertIsNone(dead["delta_adj"], "dead time is not a bot to work on")
+
+    def test_split_deltas_are_absent_without_a_baseline(self):
+        """Air Spectral Easy is fixtured with no .perf, so it has no charted
+        PB -- there is nothing to measure against and nothing to take a mean
+        of. The splits still stand on their own."""
+        run_id = self.conn.execute(
+            "SELECT id FROM run WHERE scenario='Air Spectral Easy' "
+            "ORDER BY started_at LIMIT 1").fetchone()[0]
+        payload = server.build_run_payload(self.conn, run_id)
+        self.assertEqual(len(payload["splits"]), 7)
+        for split in payload["splits"]:
+            self.assertIsNone(split["delta"])
+            self.assertIsNone(split["delta_adj"])
+
     def test_a_timed_run_keeps_its_per_second_axis(self):
         payload = server.build_run_payload(
             self.conn, self.run_for("Air Voltaic Invincible 4 Medium"))

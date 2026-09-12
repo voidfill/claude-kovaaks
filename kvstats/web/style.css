@@ -224,10 +224,22 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   color:var(--faint); border-bottom-color:var(--line-2);
 }
 #splitTable th:first-child,#splitTable td:first-child{text-align:left}
-#splitTable td.idx{color:var(--faint); white-space:nowrap}
-#splitTable td.bot{color:var(--dim)}
+#splitTable td.bot{color:var(--ink); white-space:nowrap}
+
+/* The bar takes the width the numbers were not using anyway, capped so it
+   stays a bar rather than a rule across an ultrawide panel. */
+#splitTable th,#splitTable td{white-space:nowrap}
+#splitTable th.barh,#splitTable td.barc{text-align:left; width:100%; padding-left:4px}
+#splitTable .bar{
+  display:block; height:9px; max-width:560px; border-radius:2px;
+  background:var(--bg-raise); box-shadow:inset 0 0 0 1px var(--line);
+}
+#splitTable .bar i{display:block; height:100%; border-radius:2px; background:var(--dim)}
+#splitTable .bar.up i{background:var(--bad)}
+#splitTable .bar.dn i{background:var(--good)}
+/* Dead time is real elapsed but not anyone's fault -- present, not accused. */
+#splitTable .bar.dead i{background:var(--ghost)}
 #splitTable tbody tr:hover td{background:var(--bg-raise)}
-#splitTable tr.tot td{border-top:1px solid var(--line-2); color:var(--ink)}
 #splitTable tr.w td:first-child{box-shadow:inset 2px 0 0 var(--bad)}
 #splitTable .up{color:var(--bad)}
 #splitTable .dn{color:var(--good)}

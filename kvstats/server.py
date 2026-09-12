@@ -264,6 +264,18 @@ def _race_splits(conn, run, base):
                      "base": other["ttk"] if other else None,
                      "delta": (kill["ttk"] - other["ttk"]) if other else None})
 
+    # How much this bot cost you *over and above how the run went generally*.
+    # A plain delta against the PB ranks the bots you find hard; subtracting
+    # the run's own mean delta takes the bad-day component out and leaves the
+    # bot that actually broke ranks. Sums to zero across the bots by
+    # construction, which is what makes it readable as "better or worse than
+    # the rest of this run".
+    deltas = [row["delta"] for row in rows if row["delta"] is not None]
+    mean_delta = sum(deltas) / len(deltas) if deltas else None
+    for row in rows:
+        row["delta_adj"] = (None if row["delta"] is None or mean_delta is None
+                            else row["delta"] - mean_delta)
+
     mine_dead = run["elapsed_s"] - sum(k["ttk"] for k in mine)
     base_dead = None
     if base_by_idx:
@@ -272,8 +284,10 @@ def _race_splits(conn, run, base):
         if base_run and base_run["elapsed_s"]:
             base_dead = base_run["elapsed_s"] - sum(
                 k["ttk"] for k in base_by_idx.values())
+    # Dead time is the gap between bots, not a bot: it is part of the total but
+    # it has no place in a ranking of which bot to work on.
     rows.append({"idx": None, "bot": "dead time", "mine": mine_dead,
-                 "base": base_dead,
+                 "base": base_dead, "delta_adj": None,
                  "delta": (mine_dead - base_dead) if base_dead is not None else None})
     return rows
 

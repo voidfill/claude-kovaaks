@@ -340,8 +340,11 @@ function renderSplits(p) {
   const panel = $('#splitPanel');
   panel.hidden = !(p.splits && p.splits.length);
   if (panel.hidden) return;
-  const worst = p.splits.filter(s => s.idx != null && s.delta > 0)
-    .sort((a, b) => b.delta - a.delta).slice(0, 2).map(s => s.idx);
+  // Marked off the run-relative delta, not the raw one: the raw delta ranks
+  // the bots you find hard, which are the same bots every run and so tell you
+  // nothing about this one.
+  const worst = p.splits.filter(s => s.idx != null && s.delta_adj > 0)
+    .sort((a, b) => b.delta_adj - a.delta_adj).slice(0, 2).map(s => s.idx);
   // Red means worse. Every row above `score` is seconds, where more is worse;
   // score runs the other way, so it passes worse = -1 to flip the colours.
   const cell = (v, worse = 1) => v == null ? '—'
@@ -352,22 +355,38 @@ function renderSplits(p) {
   const baseTotal = p.splits.every(s => s.base != null)
     ? p.splits.reduce((a, s) => a + s.base, 0) : null;
   const baseScore = p.delta.baseline ? p.delta.baseline.score : null;
-  $('#splitSub').textContent = `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`;
-  // Splits + dead = elapsed = budget - score, so the last two rows are the
-  // same quantity read twice and their Δs are each other negated. The "Δ s"
-  // header stays true across both: one second is exactly one point here.
+
+  // The run summary moves into the panel head, where it reads as a caption
+  // instead of two more rows competing with the bots for the eye.
+  $('#splitSub').textContent = [
+    `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`,
+    `${num(total, 2)} s`,
+    baseTotal == null ? '' : `PB ${num(baseTotal, 2)} · ${signed(total - baseTotal, 2)}`,
+    `score ${num(p.run.score, 2)}`
+  ].filter(Boolean).join('  ·  ');
+
+  // The bar is what neither chart can show: on a progress axis every bot
+  // spans exactly 1/N of the width however long it actually took. Scaled so
+  // the longest bot fills the track -- against the whole run the five bars
+  // all sit near a fifth of it, and the differences between them, which are
+  // the point, disappear. The bars stay true to each other either way.
+  // Dead time gets one too (it is the same clock) but no ranking, since it
+  // is not a bot you can practise.
+  const longest = Math.max(...p.splits.map(s => s.mine), 0);
+  const bar = s => {
+    const tint = s.idx == null ? ' dead'
+      : s.delta == null ? '' : s.delta > 0 ? ' up' : s.delta < 0 ? ' dn' : '';
+    const width = longest > 0 ? (s.mine / longest) * 100 : 0;
+    return `<span class="bar${tint}"><i style="width:${width.toFixed(2)}%"></i></span>`;
+  };
   $('#splitTable').innerHTML =
-    `<thead><tr><th></th><th>bot</th><th>this run</th><th>PB</th><th>Δ s</th></tr></thead><tbody>` +
+    `<thead><tr><th>bot</th><th class="barh">time per bot</th><th>this run</th>
+       <th>PB</th><th>Δ PB</th><th>Δ run</th></tr></thead><tbody>` +
     p.splits.map(s => `<tr class="${worst.includes(s.idx) ? 'w' : ''}">
-      <td class="idx">${s.idx == null ? '' : 'bot ' + s.idx}</td>
-      <td class="bot">${s.bot}</td><td>${num(s.mine, 2)}</td>
-      <td>${num(s.base, 2)}</td><td>${cell(s.delta)}</td></tr>`).join('') +
-    `<tr class="tot"><td class="idx"></td><td class="bot">total elapsed</td>
-       <td>${num(total, 2)}</td><td>${num(baseTotal, 2)}</td>
-       <td>${cell(baseTotal == null ? null : total - baseTotal)}</td></tr>
-     <tr><td class="idx"></td><td class="bot">score</td>
-       <td>${num(p.run.score, 2)}</td><td>${num(baseScore, 2)}</td>
-       <td>${cell(baseScore == null ? null : p.run.score - baseScore, -1)}</td></tr></tbody>`;
+      <td class="bot">${s.bot}</td><td class="barc">${bar(s)}</td>
+      <td>${num(s.mine, 2)}</td><td>${num(s.base, 2)}</td>
+      <td>${cell(s.delta)}</td><td>${cell(s.delta_adj)}</td></tr>`).join('') +
+    `</tbody>`;
 }
 
 /* ═══════════════════════════ HEADLINE ═════════════════════ */
