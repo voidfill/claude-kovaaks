@@ -3,9 +3,8 @@
 Step two of three. Makes a run appear in the dashboard shortly after it ends,
 the way `python -m kvstats` does today.
 
-**Do not implement this yet.** One blocking question has to be answered first,
-and if it answers badly this document collapses to a single line: live stays in
-the Python. See Blocking question.
+Ready to implement. The question that blocked it — whether the observer survives
+a backgrounded tab — was answered on 2026-09-13 and answered well.
 
 Depends on [the read-only browser app](2026-09-13-kvstats-browser-design.md) for
 the source boundary and the incremental index path, and on
@@ -13,25 +12,27 @@ the source boundary and the incremental index path, and on
 default-path user obtains a watchable folder at all. Users whose Steam library
 already lives outside `Program Files` need only this document.
 
-## Blocking question
+## A backgrounded tab is not throttled
 
-**Does `FileSystemObserver` fire in a backgrounded tab?**
+Measured over ten minutes with the tab minimised, a file written every thirty
+seconds from outside the browser, each filename carrying its own write time so
+the lag was measured rather than estimated:
 
-Everything measured so far was in a foreground tab, which is not the use case.
-The use case is a fullscreen aim trainer on one monitor and the dashboard on
-another, or minimised entirely — a tab that Chrome may throttle, and may discard
-outright under memory pressure. A discarded tab loses its observer, its
-in-memory state, and any debounce in flight.
+| | |
+|---|---|
+| Files written / noticed | 20 / 20, none missed |
+| Fires while `visibilityState === "hidden"` | 78 of 78 |
+| First-notice lag | median **3 ms**, max 12 ms |
+| Freeze, discard, or reload | none |
 
-The Python server has no equivalent failure mode: it is a process, and it keeps
-running.
+No throttling, no batching, and no drift as the tab sat there. This is faster
+than the Python's filesystem poll, and it means the README's "about a second
+after a run ends" survives the port.
 
-Test before writing any more of this: attach an observer, background the tab
-behind a fullscreen game, play a run, and see whether and when it fires. Then
-repeat minimised, and after twenty minutes idle. If it does not fire reliably,
-stop — the honest answer is that live belongs in the Python, and this document
-should say so instead of describing a feature that works on the developer's
-monitor and nobody else's.
+**What this did not test:** a machine under real memory pressure. Tab discard is
+driven by memory, not elapsed time, so "Chrome never discarded the tab" here
+means only that it had no reason to. Treat throttling as settled and discard as
+unlikely but unproven — which the reconcile below covers anyway.
 
 ## What is already known
 
@@ -45,12 +46,14 @@ target directory being renamed or moved. Any of those plausibly invalidates it,
 and the claim should not be widened past what was actually observed until a
 matrix exists.
 
-**`FileSystemObserver` exists and fires**, within the same second as the write.
+**`FileSystemObserver` fires within milliseconds**, foreground or background.
 Two mechanics follow, both mandatory:
 
-- **One run raises several events.** `appeared` when the file is created, then
-  `modified` as the game writes its contents. Indexing on the event parses a
-  half-written CSV. Coalesce per basename and wait for quiet before reading.
+- **One run raises several events** — 3.9 per file on average across 78
+  observed events. `appeared` when the file is created, then `modified` as the
+  game writes its contents. Indexing on the first event parses a half-written
+  CSV essentially every time. Coalesce per basename and wait for quiet before
+  reading; this is load-bearing, not a precaution.
 - **The `.perf` arrives after the `.csv`** — about two seconds apart in testing.
   Index the run curve-less on the first event and upgrade it when the second
   arrives. That is the same state the index already carries for the roughly one
@@ -79,21 +82,37 @@ crosses a shape boundary (race classification flips on the first `.perf`, and
 forward-pass recompute from step one is triggered here too, not just on
 out-of-order inserts.
 
-**Fallback if the observer is unavailable or unreliable:** a names-only
-enumeration diff. Measured at ~2.2 s per directory at 12k runs, so roughly a
-3–5 s update latency at that scale against the Python's ~1 s — and a constant
-background cost that scales with library size. Acceptable as a fallback, not as
-the design.
+### Events plus a safety-net sweep
 
-**Reconcile on open regardless.** Whatever happened while the page was closed is
-found by the same names-only enumeration, ~4 s for both directories at 12k runs.
-Render from the cache immediately and reconcile behind it.
+Events carry the normal case; a periodic enumeration catches whatever they miss.
+Same belt-and-braces shape `watch.py` already uses, and for the same reason: the
+observer is a notification, not a guarantee. It cannot report what happened while
+the tab was discarded, and it has failure modes nobody has mapped.
+
+- **The observer is the primary path.** 3 ms, and it does the work.
+- **Sweep only while the tab is focused.** A backgrounded tab is already covered
+  by events, and a user who is not looking does not need a reconcile. This also
+  keeps the cost off the machine while a game is running, which is exactly when
+  it should not be spending cycles.
+- **Reconcile on every page load**, before anything else. This is the only thing
+  that catches a discarded tab or a closed browser, so it is not optional.
+
+**The sweep interval must scale with library size.** A names-only enumeration
+(`.keys()`, never `.entries()`) costs ~2.2 s per directory at 12k runs. A flat
+10 s interval would spend a fifth of wall-clock time enumerating on a large
+library, while being nearly free on a small one. Time each sweep and set the
+next delay from what it actually cost — `max(10 s, 10 × last sweep)` keeps the
+duty cycle at or under ten percent and self-tunes across the whole range, from a
+200-run beginner to the 12k case. Do not hard-code 10 s.
 
 ## Open questions
 
 - The handle-permission matrix above: restart, reboot, dormancy, moved target.
 - Whether a discarded tab can re-attach silently on restore, or whether the user
-  must click.
+  must click. The load-time reconcile makes this a UX question rather than a
+  correctness one.
+- Whether the observer behaves under genuine memory pressure — a fullscreen game
+  plus a large library — which the ten-minute idle test could not provoke.
 - Whether the observer survives the target being replaced wholesale — relevant
   if [reaching the install](2026-09-13-kvstats-reaching-the-install.md) ends up
   using copy-based sync, where the watched directory's contents are rewritten
