@@ -336,6 +336,8 @@ first thing a new user reads.
 - **How loudly should staleness be reported?** The app knows when it last read
   the folder and nothing since. Age is easy; how insistently to prompt a re-pick
   is a UI decision this document does not make.
-- **Non-Windows.** Linux and macOS installs are likely reachable by the picker
-  directly, which would make them Tier 1 by default. Nobody has checked.
+- ~~Non-Windows.~~ Answered from Chromium's blocklist source: Linux's default
+  Steam path is not listed, so those users get the live tier directly with no
+  setup; macOS is blocked but the game does not ship for it. See
+  [reaching the install](2026-09-13-kvstats-reaching-the-install.md).
 - **What replaces `drive-client.mjs`**, given the constraints above.
