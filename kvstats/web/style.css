@@ -375,6 +375,54 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .formbar{position:relative; height:6px; background:var(--line); border-radius:1px; min-width:80px}
 .formbar i{position:absolute; inset:0 auto 0 0; background:var(--band); border-radius:1px}
 
+/* ── scrollbars ──────────────────────────────────────────── */
+/* The three vertical scrollports keep their gutter whether or not they are
+   currently overflowing, so content stops jumping sideways as a pane crosses
+   the threshold -- switching between the short session sheet and the long
+   scenarios one used to shift every column by the width of a scrollbar.
+   .table-wrap is deliberately left out: its overflow is horizontal, and a
+   stable gutter there reserves a permanent empty strip under every table. */
+.stage, .sheet, .runlist{scrollbar-gutter:stable}
+
+/* The two styling mechanisms are mutually exclusive, not layered. Chromium
+   supports both, and the moment `scrollbar-color` is set it stops applying
+   ::-webkit-scrollbar to that element -- so declaring them together would
+   silently drop the inset thumb below and leave the plain bar. Firefox fails
+   the selector() test and takes the standard branch, which is all it has. */
+@supports not selector(::-webkit-scrollbar){
+  html, .stage, .sheet, .runlist, .table-wrap{
+    scrollbar-width:thin;
+    scrollbar-color:var(--line-2) transparent;
+  }
+  .stage:hover, .sheet:hover, .runlist:hover, .table-wrap:hover{
+    scrollbar-color:var(--ghost) transparent;
+  }
+}
+
+@supports selector(::-webkit-scrollbar){
+  ::-webkit-scrollbar{width:10px; height:10px}
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner{background:transparent}
+  /* A transparent border plus content-box clipping paints a 4px thumb inside
+     a 10px track, which is what keeps it off the edge without a channel. */
+  ::-webkit-scrollbar-thumb{
+    background:var(--line-2);
+    background-clip:content-box;
+    border:3px solid transparent;
+    border-radius:999px;
+  }
+  /* Scoped to the scrollports themselves rather than *:hover -- :hover matches
+     every ancestor under the pointer, so a universal rule would light up every
+     scrollbar on the page at once. */
+  .stage:hover::-webkit-scrollbar-thumb,
+  .sheet:hover::-webkit-scrollbar-thumb,
+  .runlist:hover::-webkit-scrollbar-thumb,
+  .table-wrap:hover::-webkit-scrollbar-thumb{
+    background:var(--ghost);
+    background-clip:content-box;
+  }
+}
+
 /* ── narrow / mobile ─────────────────────────────────────── */
 @media (max-width:1000px){
   html,body{height:auto}
