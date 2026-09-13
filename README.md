@@ -82,12 +82,30 @@ Three things worth knowing about the data:
     references/kovaaks.md   on-disk format and API notes, verified against a real install
 kvstats/                 the dashboard: parser, index, watcher, server, web assets
 tests/                   unit tests for the playlist CLI and every kvstats module
+scripts/drive-client.mjs drives kvstats' own app.js against a running server
 docs/                    design spec
 ```
 
 ```
 python -m unittest discover -s tests
 ```
+
+The unit tests cover the Python. The dashboard's browser half has one extra
+rig, kept out of the suite on purpose — it needs node and a live server, and a
+test that silently skips when it cannot find either reports green while
+covering nothing. Run it by hand after touching the rail, the paging, or the
+run-time formatting:
+
+```
+python -m kvstats                 # one terminal
+node scripts/drive-client.mjs     # another
+```
+
+It loads `kvstats/web/app.js` — the same file the browser gets, unmodified on
+disk — under a stub DOM, so it exercises the real client rather than a copy of
+it. What it cannot see is what the browser does for itself: CSS, layout, event
+dispatch. Those still want eyes on the page. Exit 0 passed, 1 failed, 2 could
+not reach the server; `--port=` or `--base=` if it is not on 8777.
 
 To use the skill outside this repo as well, link the skill directory into your personal
 skills folder. Symlinked skill directories are supported, and a junction (`/J`) needs no

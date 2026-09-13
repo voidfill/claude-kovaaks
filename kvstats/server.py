@@ -107,7 +107,7 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
     scenario = ({key: scen_row[key] for key in scen_row.keys()} if scen_row else
                 {"name": run["scenario"], "shape": shapes.TIMED, "penalising": 0,
                  "budget": None, "pool": None, "bots": None, "clock_s": None,
-                 "evidence": "default"})
+                 "windowed": 0, "evidence": "default"})
     is_race = scenario["shape"] == shapes.RACE
 
     curve = index.load_curve(conn, run_id)
@@ -131,6 +131,8 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
                   "compare_until": None, "baseline": None},
         "marks": {"kills": [], "labels": [], "aligned": False},
         "splits": [],
+        "windows": [],
+        "window_summary": None,
         "baselines": {
             "true_pb": base["true_pb"],
             "candidates": base["candidates"],
@@ -144,17 +146,29 @@ def build_run_payload(conn, run_id, metric="score", smoothing=5, recent_n=10,
     }
 
     if is_race:
-        _fill_race(conn, payload, run, scenario, curve, base, smoothing)
+        _fill_race(conn, payload, run, scenario, curve, base, smoothing, same_cfg)
     else:
-        _fill_timed(conn, payload, run, curve, base, metric, smoothing)
+        _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing,
+                    same_cfg)
     return payload
 
 
-def _fill_timed(conn, payload, run, curve, base, metric, smoothing):
-    """The existing behaviour, unchanged: native per-second grid, score units."""
+def _fill_timed(conn, payload, run, scenario, curve, base, metric, smoothing,
+                same_cfg=True):
+    """Native per-second grid, score units -- plus bot windows where the
+    scenario spends its clock on a rotation of bots that never die."""
     mine = _series(curve, metric) if curve else []
     payload["rate"]["mine"] = compare.smooth(mine, smoothing)
-    payload["marks"]["kills"] = [k["t"] for k in index.load_kills(conn, run["id"])]
+    kills = index.load_kills(conn, run["id"])
+    payload["marks"]["kills"] = [k["t"] for k in kills]
+    # A window boundary is the scenario's, not the player's, so it falls at the
+    # same second in every run. That is what `aligned` means to the chart: draw
+    # them as shared, named boundaries rather than this run's private events.
+    if scenario["windowed"]:
+        payload["marks"]["aligned"] = True
+        payload["marks"]["labels"] = [k["bot"] for k in kills]
+        payload["windows"] = _bot_windows(conn, run, base, same_cfg)
+        payload["window_summary"] = _window_summary(conn, run, base)
 
     if curve and base["pb"] and base["pb"]["curve"]:
         pb_curve = base["pb"]["curve"]
@@ -179,7 +193,8 @@ def _fill_timed(conn, payload, run, curve, base, metric, smoothing):
                                    for k, v in raw.items()}
 
 
-def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
+def _fill_race(conn, payload, run, scenario, curve, base, smoothing,
+               same_cfg=True):
     """Progress axis, damage rate, seconds-based delta, shared kill marks."""
     bots = scenario["bots"] or 1
     steps = compare.race_grid(bots)
@@ -235,7 +250,7 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
             payload["rate"]["band"] = {k: compare.smooth(v, smoothing)
                                        for k, v in raw.items()}
 
-    payload["splits"] = _race_splits(conn, run, base)
+    payload["splits"] = _race_splits(conn, run, base, same_cfg)
     # Name the boundaries after the bots that hold them, reusing the rows the
     # split table already loaded. A run that quit early names fewer bots than
     # the scenario has; the chart falls back to the ordinal for the rest.
@@ -243,7 +258,54 @@ def _fill_race(conn, payload, run, scenario, curve, base, smoothing):
                                   if split["idx"] is not None][:bots]
 
 
-def _race_splits(conn, run, base):
+def _peer_ids(conn, run, same_cfg, shape):
+    """Every run this one can fairly be judged against, and itself.
+
+    Itself because `best` is a ceiling: on the run that set it the column has
+    to read that run's own number and the gap has to be zero, not blank.
+    """
+    rows = compare.candidates(conn, run["id"], same_cfg=same_cfg, shape=shape)
+    return [row["id"] for row in rows] + [run["id"]]
+
+
+def _best_by_slot(conn, ids, expr, direction):
+    """{slot: best value of `expr`} over `ids`, best meaning MIN or MAX.
+
+    SQLite yields NULL rather than raising for x/0, so the IS NOT NULL guard
+    covers a window that offered no damage as well as a missing column.
+    """
+    if not ids:
+        return {}
+    holes = ",".join("?" * len(ids))
+    return {row["idx"]: row["best"] for row in conn.execute(
+        f"SELECT idx, {direction}({expr}) AS best FROM kill "
+        f"WHERE run_id IN ({holes}) AND ({expr}) IS NOT NULL GROUP BY idx",
+        list(ids))}
+
+
+def _share(kill):
+    possible = kill["dmg_possible"]
+    return None if not possible else kill["dmg_done"] / possible
+
+
+def _window_summary(conn, run, base):
+    """Whole-run share for this run and for the PB run.
+
+    Damage taken over damage offered, not the mean of the per-window shares:
+    the windows are not all the same length -- 18.99 s against 20.39 s on the
+    VT scenarios -- so an unweighted mean over-counts the short one.
+    """
+    def overall(run_id):
+        kills = index.load_kills(conn, run_id)
+        done = sum(k["dmg_done"] for k in kills if k["dmg_done"] is not None)
+        possible = sum(k["dmg_possible"] for k in kills if k["dmg_possible"])
+        return None if not possible else done / possible
+
+    return {"mine": overall(run["id"]),
+            "base": overall(base["pb"]["run_id"]) if base["pb"] else None}
+
+
+def _race_splits(conn, run, base, same_cfg=True):
     """Per-bot rows plus the dead-time residual, so the table reconciles.
 
     Dead time is not modelled as a scenario constant: it is stable within a
@@ -257,11 +319,17 @@ def _race_splits(conn, run, base):
     if base["pb"]:
         base_by_idx = {k["idx"]: k for k in index.load_kills(conn, base["pb"]["run_id"])}
 
+    # Fastest this bot has ever gone down, this run included -- the column
+    # says what the ceiling is, so the run that set it must show itself.
+    best = _best_by_slot(conn, _peer_ids(conn, run, same_cfg, shapes.RACE),
+                         "ttk", "MIN")
+
     rows = []
     for kill in mine:
         other = base_by_idx.get(kill["idx"])
         rows.append({"idx": kill["idx"], "bot": kill["bot"], "mine": kill["ttk"],
                      "base": other["ttk"] if other else None,
+                     "best": best.get(kill["idx"]),
                      "delta": (kill["ttk"] - other["ttk"]) if other else None})
 
     # How much this bot cost you *over and above how the run went generally*.
@@ -287,13 +355,87 @@ def _race_splits(conn, run, base):
     # Dead time is the gap between bots, not a bot: it is part of the total but
     # it has no place in a ranking of which bot to work on.
     rows.append({"idx": None, "bot": "dead time", "mine": mine_dead,
-                 "base": base_dead, "delta_adj": None,
+                 "base": base_dead, "best": None, "delta_adj": None,
                  "delta": (mine_dead - base_dead) if base_dead is not None else None})
+    return rows
+
+
+def _bot_windows(conn, run, base, same_cfg=True):
+    """Per-bot share of the damage its window made available.
+
+    Raw damage is unreadable across scenarios -- 0.009 a window on Plink Palace
+    against 0.86 on Aether -- and the window is a fixed length, so the damage it
+    offers is a constant. The share of it you took is the same number in every
+    scenario, and it is what the window was for.
+    """
+    kills = index.load_kills(conn, run["id"])
+    if not kills:
+        return []
+    share = _share
+
+    base_by_idx = {}
+    if base["pb"]:
+        base_by_idx = {k["idx"]: k
+                       for k in index.load_kills(conn, base["pb"]["run_id"])}
+
+    # The same recent-N the chart's band is built from, so the stepper moves
+    # both and the two cannot disagree about what "recent" means.
+    recent_by_idx = {}
+    recent_ids = base["recent"]["run_ids"] or []
+    if recent_ids:
+        holes = ",".join("?" * len(recent_ids))
+        for row in conn.execute(
+                "SELECT idx, dmg_done, dmg_possible FROM kill "
+                f"WHERE run_id IN ({holes})", list(recent_ids)):
+            value = share(row)
+            if value is not None:
+                recent_by_idx.setdefault(row["idx"], []).append(value)
+
+    # The most of this window anyone has taken, this run included.
+    best = _best_by_slot(conn, _peer_ids(conn, run, same_cfg, shapes.TIMED),
+                         "dmg_done * 1.0 / dmg_possible", "MAX")
+
+    rows = []
+    for kill in kills:
+        mine = share(kill)
+        other = base_by_idx.get(kill["idx"])
+        against = share(other) if other else None
+        pool = recent_by_idx.get(kill["idx"]) or []
+        recent = sum(pool) / len(pool) if pool else None
+        rows.append({
+            "idx": kill["idx"], "bot": kill["bot"], "window_s": kill["ttk"],
+            "mine": mine, "base": against, "best": best.get(kill["idx"]),
+            "recent": recent,
+            "delta": None if mine is None or against is None else mine - against,
+            "delta_recent": None if mine is None or recent is None else mine - recent,
+        })
     return rows
 
 
 def _rows(conn, sql, args=()):
     return [{k: r[k] for k in r.keys()} for r in conn.execute(sql, args).fetchall()]
+
+
+# What the rail draws with. `compare.page` selects whole run rows because the
+# comparison rules need most of them; only these reach the client.
+RUN_LIST_COLUMNS = ("id", "scenario", "started_at", "score", "accuracy", "spm",
+                    "cfg_key", "buckets", "shape", "best_before", "played_before")
+
+
+def run_list(conn, limit, scenario=None, before=None, same_cfg=True):
+    """The run rail's rows, already marked against the whole history.
+
+    The marks used to be folded in the browser over whatever page had been
+    fetched, which made the answer depend on the page size: a personal best
+    five minutes outside a 100-run window left the rail calling the next run a
+    PB while the headline, reading all of history, called it a loss.
+
+    `before` is the id of the last row the rail already holds; the page picks
+    up at the run just older than it.
+    """
+    return [{key: row[key] for key in RUN_LIST_COLUMNS}
+            for row in compare.page(conn, limit, scenario=scenario,
+                                    before=before, same_cfg=same_cfg)]
 
 
 def make_handler(cfg, conn, subscribers, lock, watcher=None):
@@ -377,31 +519,22 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                     "watcher_errors": watcher.stats["errors"] if watcher else 0,
                 })
 
-            # buckets comes from the curve table, not run: the run list marks
-            # runs with no per-second data, and roughly one run in seven has
-            # none. NULL (no curve row) is the marker, so it must be selected
-            # rather than inferred from perf_file, which is set before the
-            # .perf is parsed.
             if route == "/api/runs":
                 scenario = one("scenario")
+                before = one("before")
                 try:
                     limit = _bounded_int(one("limit", "50"), 0, MAX_LIMIT)
+                    # A cursor reaches the same query `limit` does, so it gets
+                    # the same bounds check rather than a 500 from deep inside
+                    # conn.execute. An id that is merely absent is a valid
+                    # question with an empty answer, and is not checked here.
+                    if before is not None:
+                        before = _bounded_int(before, 1, SQLITE_INT_MAX)
                 except ValueError as error:
                     return self._json({"error": str(error)}, 400)
-                if scenario:
-                    return self._json(_rows(
-                        conn,
-                        "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                        "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
-                        "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
-                        "FROM run WHERE scenario=? ORDER BY started_at DESC LIMIT ?",
-                        (scenario, limit)))
-                return self._json(_rows(
-                    conn,
-                    "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                    "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
-                    "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
-                    "FROM run ORDER BY started_at DESC LIMIT ?", (limit,)))
+                return self._json(run_list(
+                    conn, limit, scenario=scenario or None, before=before,
+                    same_cfg=one("same_cfg", "1") != "0"))
 
             if route == "/api/scenarios":
                 return self._json(_rows(conn, """

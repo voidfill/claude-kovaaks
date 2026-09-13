@@ -310,7 +310,10 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   border-left:2px solid transparent; cursor:pointer;
 }
 .run:hover{background:var(--bg-raise)}
-.run .t{font:400 11px/1 var(--mono); color:var(--ghost)}
+/* Both forms the time column can take -- "16:47" and "Sep 8" -- are five
+   characters, so pinning the width keeps the scenario names on one edge
+   instead of jogging as you scroll past midnight. */
+.run .t{font:400 11px/1 var(--mono); color:var(--ghost); min-width:5ch}
 .run .name{font-size:12.5px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .run .right{display:flex; align-items:baseline; gap:8px}
 .run .sc{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; color:var(--dim)}
@@ -355,9 +358,10 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .table-wrap{overflow:auto}
 .tbl{width:100%; border-collapse:collapse; font-size:12.5px}
 .tbl th{
-  text-align:left; font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em;
+  text-align:right; font:400 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.12em;
   color:var(--faint); padding:0 10px 7px; border-bottom:1px solid var(--line); white-space:nowrap;
 }
+.tbl th:first-child{text-align:left}          /* the scenario name; every other column is numeric */
 .tbl td{padding:8px 10px; border-bottom:1px solid color-mix(in oklab,var(--line) 60%,transparent); color:var(--dim)}
 .tbl tbody tr{cursor:pointer}
 .tbl tbody tr:hover td{background:var(--bg-panel); color:var(--ink)}
@@ -370,6 +374,56 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 .bars i[data-pb="1"]{background:var(--pb)}
 .formbar{position:relative; height:6px; background:var(--line); border-radius:1px; min-width:80px}
 .formbar i{position:absolute; inset:0 auto 0 0; background:var(--band); border-radius:1px}
+
+/* ── scrollbars ──────────────────────────────────────────── */
+/* The three vertical scrollports keep their gutter whether or not they are
+   currently overflowing, so content stops jumping sideways as a pane crosses
+   the threshold -- switching between the short session sheet and the long
+   scenarios one used to shift every column by the width of a scrollbar.
+   .table-wrap is deliberately left out: its overflow is horizontal, and a
+   stable gutter there reserves a permanent empty strip under every table. */
+.stage, .sheet, .runlist{scrollbar-gutter:stable}
+
+/* One pair of rules decides the thumb colour, and both rendering branches
+   below just read --thumb. Custom properties inherit into pseudo-elements, so
+   setting the variable on a scrollport is enough to recolour its own bar --
+   which is what keeps hover to a single selector list instead of one per
+   branch. Scoped to the scrollports rather than *:hover, because :hover
+   matches every ancestor under the pointer and a universal rule would light
+   up every scrollbar on the page at once. */
+html, .stage, .sheet, .runlist, .table-wrap{--thumb:var(--line-2)}
+.stage:hover, .sheet:hover, .runlist:hover, .table-wrap:hover{--thumb:var(--ghost)}
+
+/* The two styling mechanisms are mutually exclusive, not layered. Chromium
+   supports both, and the moment `scrollbar-color` is set it stops applying
+   ::-webkit-scrollbar to that element -- so declaring them together would
+   silently drop the inset thumb below and leave the plain bar. Firefox fails
+   the selector() test and takes the standard branch, which is all it has. */
+@supports not selector(::-webkit-scrollbar){
+  html, .stage, .sheet, .runlist, .table-wrap{
+    scrollbar-width:thin;
+    scrollbar-color:var(--thumb) transparent;
+  }
+}
+
+@supports selector(::-webkit-scrollbar){
+  ::-webkit-scrollbar{width:10px; height:10px}
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner{background:transparent}
+  /* A transparent border plus content-box clipping paints a 4px thumb inside
+     a 10px track, which is what keeps it off the edge without a channel.
+     background-color, not the background shorthand: the shorthand resets
+     background-clip to border-box, and the thumb would fill the gutter. */
+  ::-webkit-scrollbar-thumb{
+    background-color:var(--thumb);
+    background-clip:content-box;
+    border:3px solid transparent;
+    border-radius:999px;
+  }
+  /* Grabbing the bar itself brightens it once more, wherever the pointer came
+     from -- this one fires on the thumb's own hover, not the container's. */
+  ::-webkit-scrollbar-thumb:hover{background-color:var(--faint)}
+}
 
 /* ── narrow / mobile ─────────────────────────────────────── */
 @media (max-width:1000px){

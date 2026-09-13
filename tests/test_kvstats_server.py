@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -236,6 +237,119 @@ class RunPayload(ServerBase):
         self.assertIsNotNone(band)
         for series in ("mean", "lo", "hi"):
             self.assertEqual(len(band[series]), payload["run"]["buckets"])
+
+
+class RunList(ServerBase):
+    """`/api/runs` is the rail's whole world. It has to arrive already marked:
+    the client cannot work out how a run stood against its history from a page
+    that does not contain that history."""
+
+    def test_every_row_says_how_it_stood_against_its_own_history(self):
+        rows = json.loads(json.dumps(server.run_list(self.conn, limit=50)))
+        self.assertEqual(len(rows), 11)
+        for row in rows:
+            self.assertIn("best_before", row)
+            self.assertIn("played_before", row)
+
+        # VT Ground Intermediate S5 is played twice in the fixtures, 1814 then
+        # 2009 -- so the later run has something to have beaten.
+        ground = [r for r in rows if r["scenario"] == "VT Ground Intermediate S5"]
+        ground.sort(key=lambda r: r["started_at"])
+        self.assertEqual([r["played_before"] for r in ground], [0, 1])
+        self.assertIsNone(ground[0]["best_before"])
+        self.assertEqual(ground[1]["best_before"], 1814.0)
+
+    def test_the_rows_carry_what_the_rail_draws_with(self):
+        """buckets marks the runs with no curve and shape picks the row's icon;
+        both were already in the payload and must survive the rewrite."""
+        rows = server.run_list(self.conn, limit=50)
+        by_id = {r["id"]: r for r in rows}
+        curved = self.conn.execute(
+            "SELECT run_id, buckets FROM curve LIMIT 1").fetchone()
+        self.assertEqual(by_id[curved[0]]["buckets"], curved[1])
+        flat = self.conn.execute(
+            "SELECT id FROM run WHERE perf_file IS NULL LIMIT 1").fetchone()[0]
+        self.assertIsNone(by_id[flat]["buckets"])
+        self.assertEqual(by_id[curved[0]]["shape"],
+                         self.conn.execute(
+                             "SELECT shape FROM scenario WHERE name=?",
+                             (by_id[curved[0]]["scenario"],)).fetchone()[0])
+
+    def test_the_rail_can_ask_for_the_runs_older_than_the_one_it_has(self):
+        """How the rail loads more as you scroll. The cursor is a run id, so
+        the client hands back the last row it drew rather than an offset that
+        shifts under it when a run lands mid-scroll."""
+        first = server.run_list(self.conn, limit=4)
+        older = server.run_list(self.conn, limit=4, before=first[-1]["id"])
+
+        self.assertEqual(len(first), 4)
+        self.assertTrue(older, "11 fixture runs, so there is a second page")
+        self.assertFalse({r["id"] for r in first} & {r["id"] for r in older},
+                         "the pages must not overlap")
+        self.assertLess(older[0]["started_at"], first[-1]["started_at"])
+
+        rest = server.run_list(self.conn, limit=50, before=older[-1]["id"])
+        self.assertEqual(len(first) + len(older) + len(rest), 11,
+                         "and together they must be the whole history")
+
+    def test_a_bad_cursor_is_refused_rather_than_handed_to_sqlite(self):
+        """`limit` is already bounds-checked because a negative one means `no
+        limit` to SQLite and a huge one overflows it. `before` reaches the same
+        query, so it gets the same treatment rather than a 500 from the handler
+        thread."""
+        httpd = server.make_server(self.cfg, self.conn, port=0)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        for bad in ("abc", "-1", "99999999999999999999999"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/runs?before={bad}", timeout=5)
+            self.assertEqual(caught.exception.code, 400, f"before={bad}")
+
+        # an id that is simply not there is a valid question with an empty
+        # answer, not a bad request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/runs?before=999999", timeout=5) as r:
+            self.assertEqual(json.loads(r.read()), [])
+
+    def test_the_route_serves_the_marks_and_honours_the_sens_toggle(self):
+        """The rail's marks must follow the same cm/360 switch the headline
+        follows, or flipping it changes one panel and not the other."""
+        self.conn.execute(
+            "INSERT INTO run(scenario, started_at, stats_file, score, cfg_key, "
+            "duration_s, shots, hits, misses) "
+            "VALUES('VT Ground Intermediate S5', '2026-06-16T20:50:00', "
+            "       'synthetic', 2500, '99.9', 59.99, 0, 0, 0)")
+        self.conn.commit()
+
+        httpd = server.make_server(self.cfg, self.conn, port=0)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        def fetch(query):
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/runs?{query}", timeout=5) as r:
+                return {row["id"]: row for row in json.loads(r.read())}
+
+        new_id = self.conn.execute(
+            "SELECT id FROM run WHERE stats_file='synthetic'").fetchone()[0]
+
+        strict = fetch("limit=50")[new_id]
+        self.assertIsNone(strict["best_before"],
+                          "2009 was set at another sensitivity")
+        self.assertEqual(strict["played_before"], 0)
+
+        relaxed = fetch("limit=50&same_cfg=0")[new_id]
+        self.assertEqual(relaxed["best_before"], 2009.0)
+        self.assertEqual(relaxed["played_before"], 2)
+
+    def test_one_scenario_can_be_asked_for_on_its_own(self):
+        rows = server.run_list(self.conn, limit=50, scenario="Air Pure Medium")
+        self.assertEqual({r["scenario"] for r in rows}, {"Air Pure Medium"})
+        self.assertEqual(len(rows), 2)
 
 
 class LiveServer(ServerBase):

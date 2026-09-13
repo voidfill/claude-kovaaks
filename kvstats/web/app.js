@@ -13,8 +13,38 @@ const pad2 = n => String(n).padStart(2, '0');
 const num = (v, d = 1) => v == null || !isFinite(v) ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const pct = (v, d = 1) => v == null ? '—' : (v * 100).toFixed(d) + '%';
 const signed = (v, d = 1) => (v > 0 ? '+' : v < 0 ? '−' : '') + num(Math.abs(v), d);
-const hhmm = iso => { const t = new Date(iso); return pad2(t.getHours()) + ':' + pad2(t.getMinutes()); };
-const hhmmss = iso => hhmm(iso) + ':' + pad2(new Date(iso).getSeconds());
+/* A run's time reads as a clock if it happened today and as a date if it did
+   not: what you want to know about a run from last week is which day, not which
+   minute. `started_at` is a naive local ISO string and Date parses it as local,
+   which is the clock KovaaK's wrote it by -- there is no zone to convert.
+
+   Every place one of these is shown also carries runTitle() on hover, so the
+   exact stamp is never more than a pointer away. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() &&
+                          a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const clock = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+
+const runTime = iso => {
+  const d = new Date(iso), now = new Date();
+  if (sameDay(d, now)) return clock(d);
+  // The year only earns its space when it is not the current one.
+  return MONTHS[d.getMonth()] + ' ' + d.getDate() +
+         (d.getFullYear() === now.getFullYear() ? '' : ' ' + d.getFullYear());
+};
+
+/* The headline names one particular run rather than placing it in a list, and
+   seconds are what tell two runs of the same scenario apart -- so it keeps them,
+   and gains the date only when the run is not today's. */
+const runStamp = iso => {
+  const d = new Date(iso);
+  const time = clock(d) + ':' + pad2(d.getSeconds());
+  return sameDay(d, new Date()) ? time : runTime(iso) + ' ' + time;
+};
+
+const runTitle = iso => new Date(iso).toLocaleString('en-US',
+  { dateStyle: 'full', timeStyle: 'medium' });
 
 const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 let C = {};
@@ -37,20 +67,126 @@ const METRICS = [
 // series unchanged for window <= 1), so "raw" is sent as 0.
 const SMOOTH = [[0, 'raw'], [3, '3 s'], [5, '5 s']];
 const isRatio = m => m === 'accuracy' || m === 'efficiency';
+// The rail is a ledger and the headline is a verdict. Saying so on the number
+// itself is what lets the two legitimately differ on a run you later bettered.
+const RAIL_DELTA_HINT = 'against your best before this run';
 
 /* ── app state ───────────────────────────────────────────── */
 const A = {
   view: 'run',
   ctrl: { metric: 'score', smoothing: 0, recent_n: 10, same_cfg: true },
   runs: [], payload: null, focusedId: null, kbd: -1,
-  filterScenario: null, health: null
+  filterScenario: null, health: null,
+  // The rail is a window onto the history, not the whole of it. `railScenario`
+  // is the filter `runs` was actually fetched under, `more` says whether the
+  // server had further rows, and `railGen` retires a page fetch whose rail was
+  // replaced while it was in flight.
+  more: false, loading: false, railScenario: null, railStale: true, railGen: 0
 };
+
+/* ── chart controls persist locally ──────────────────────── */
+// The hash carries what you would link to — view, run, scenario filter. The
+// chart controls are a reading preference, so they live here instead of
+// cluttering every URL. Stored values are re-validated on the way in: a stale
+// or hand-edited key must not be able to send garbage to the API.
+const CTRL_KEY = 'kvstats.ctrl';
+function loadCtrl() {
+  let s;
+  try { s = JSON.parse(localStorage.getItem(CTRL_KEY) || 'null'); } catch (_) { return; }
+  if (!s || typeof s !== 'object') return;
+  const c = A.ctrl;
+  if (METRICS.some(m => m[0] === s.metric)) c.metric = s.metric;
+  if (SMOOTH.some(w => w[0] === +s.smoothing)) c.smoothing = +s.smoothing;
+  if (isFinite(+s.recent_n)) c.recent_n = clamp(Math.round(+s.recent_n), 1, 50);
+  if (typeof s.same_cfg === 'boolean') c.same_cfg = s.same_cfg;
+}
+function saveCtrl() {
+  try { localStorage.setItem(CTRL_KEY, JSON.stringify(A.ctrl)); } catch (_) {}
+}
+
+/* ── hash routing ────────────────────────────────────────── */
+/* #/run · #/run/<id> · #/run/<id>?scenario=<name> · #/session · #/scenarios */
+const VIEWS = ['run', 'session', 'scenarios'];
+
+function parseHash() {
+  const [path, qs] = location.hash.replace(/^#\/?/, '').split('?');
+  const seg = path.split('/').filter(Boolean);
+  const view = VIEWS.includes(seg[0]) ? seg[0] : 'run';
+  return {
+    view,
+    runId: view === 'run' && /^\d+$/.test(seg[1] || '') ? +seg[1] : null,
+    scenario: new URLSearchParams(qs || '').get('scenario') || null
+  };
+}
+
+function formatHash({ view, runId, scenario }) {
+  if (view !== 'run') return '#/' + view;                 // the rail is run-view state
+  return '#/run' + (runId == null ? '' : '/' + runId) +
+         (scenario ? '?scenario=' + encodeURIComponent(scenario) : '');
+}
+
+/* Patch the current route and navigate. Assigning location.hash fires
+   hashchange, so applyRoute stays the one place that acts on a route.
+   replace = true writes the URL without a history entry — and without firing
+   hashchange — for movement the user did not ask for: normalising a bad URL,
+   arrowing down the rail, a new run landing over SSE. */
+function go(patch, replace) {
+  const next = formatHash({ view: A.view, runId: A.focusedId, scenario: A.filterScenario, ...patch });
+  if (next === location.hash) return;
+  if (replace) history.replaceState(null, '', next);
+  else location.hash = next;
+}
 
 /* ── fetch layer ─────────────────────────────────────────── */
 async function api(path) {
   const r = await fetch(API + path);
   if (!r.ok) throw new Error(r.status);
   return r.json();
+}
+
+/* The rail loads a page at a time and grows as you scroll. 100 runs reached
+   back only four days on the reference history, which is nothing like enough
+   to find the session you are looking for.
+
+   Filtering is the server's job now rather than a filter() over whatever had
+   been fetched — with a partial list in hand, filtering in the browser would
+   quietly show a subset of a scenario and call it all of it. */
+const RAIL_PAGE = 100;
+
+function railQuery(extra) {
+  return `/api/runs?limit=${RAIL_PAGE}&same_cfg=${A.ctrl.same_cfg ? 1 : 0}`
+    + (A.filterScenario ? '&scenario=' + encodeURIComponent(A.filterScenario) : '')
+    + extra;
+}
+
+async function loadRail() {
+  const gen = ++A.railGen;
+  const rows = await api(railQuery(''));
+  if (gen !== A.railGen) return;                  // a newer load already won
+  A.runs = rows;
+  A.more = rows.length === RAIL_PAGE;
+  A.railScenario = A.filterScenario;
+  A.railStale = false;
+}
+
+/* Older runs, keyed off the last row we hold rather than an offset: a run
+   landing while you scroll shifts every offset by one, and the rail would
+   either repeat a row or skip one. */
+async function loadMore() {
+  if (A.loading || !A.more || !A.runs.length) return;
+  A.loading = true;
+  const gen = A.railGen;
+  try {
+    const older = await api(railQuery('&before=' + A.runs[A.runs.length - 1].id));
+    if (gen !== A.railGen) return;                // the rail was replaced under us
+    A.runs = A.runs.concat(older);
+    A.more = older.length === RAIL_PAGE;
+    renderRunList(null, true);
+  } catch (err) {
+    setStatus('down', 'api error');
+  } finally {
+    A.loading = false;
+  }
 }
 
 /* ═══════════════════════════ CHARTS ═══════════════════════ */
@@ -194,8 +330,13 @@ function drawKills(u, p) {
   const { top, height } = u.bbox;
   const ctx = u.ctx;
   ctx.save();
+  // A window's closing boundary can sit past the last plotted second -- the
+  // clock runs to 59.8 while the curve has 60 buckets numbered 0..59 -- and an
+  // unclamped rule takes its label outside the plot, where the canvas cuts it
+  // off mid-name. Clamped, the last bot still gets its rule and its full name.
+  const xmax = u.scales.x.max;
   marks.forEach((at, i) => {
-    const x = u.valToPos(at, 'x', true);
+    const x = u.valToPos(Math.min(at, xmax), 'x', true);
     ctx.setLineDash(p.marks.aligned ? [4, 3] : [2, 4]);
     ctx.lineWidth = 1;
     ctx.strokeStyle = alpha(p.marks.aligned ? C.pb : C.ghost, p.marks.aligned ? .5 : .45);
@@ -293,7 +434,7 @@ function renderCharts(p) {
 
   if (!hasCurve) {
     $('#rateEmpty').innerHTML = p.run.buckets === 0
-      ? `<strong>no per-second data</strong><span>KovaaK's wrote no <code>.perf</code> file for this run, so only the totals above are known. Roughly one run in seven lands this way.</span>`
+      ? `<strong>no per-second data</strong><span>KovaaK's wrote no <code>.perf</code> file for this run, so only the totals above are known.</span>`
       : `<strong>waiting for curve</strong><span>The run landed but its per-second file has not been parsed yet.</span>`;
     $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
     $('#deltaEmpty').innerHTML = `<span>Nothing to compare second by second.</span>`;
@@ -340,6 +481,7 @@ function renderSplits(p) {
   const panel = $('#splitPanel');
   panel.hidden = !(p.splits && p.splits.length);
   if (panel.hidden) return;
+  $('#splitTitle').textContent = 'Splits';
   // Marked off the run-relative delta, not the raw one: the raw delta ranks
   // the bots you find hard, which are the same bots every run and so tell you
   // nothing about this one.
@@ -361,7 +503,7 @@ function renderSplits(p) {
   $('#splitSub').textContent = [
     `${p.scenario.bots} bots · ${num(p.scenario.pool, 0)} damage`,
     `${num(total, 2)} s`,
-    baseTotal == null ? '' : `PB ${num(baseTotal, 2)} · ${signed(total - baseTotal, 2)}`,
+    baseTotal == null ? '' : `PB run ${num(baseTotal, 2)} · ${signed(total - baseTotal, 2)}`,
     `score ${num(p.run.score, 2)}`
   ].filter(Boolean).join('  ·  ');
 
@@ -381,19 +523,68 @@ function renderSplits(p) {
   };
   $('#splitTable').innerHTML =
     `<thead><tr><th>bot</th><th class="barh">time per bot</th><th>this run</th>
-       <th>PB</th><th>Δ PB</th><th>Δ run</th></tr></thead><tbody>` +
+       <th>PB run</th><th>Δ PB</th><th>best</th><th>Δ run</th></tr></thead><tbody>` +
     p.splits.map(s => `<tr class="${worst.includes(s.idx) ? 'w' : ''}">
       <td class="bot">${s.bot}</td><td class="barc">${bar(s)}</td>
       <td>${num(s.mine, 2)}</td><td>${num(s.base, 2)}</td>
-      <td>${cell(s.delta)}</td><td>${cell(s.delta_adj)}</td></tr>`).join('') +
+      <td>${cell(s.delta)}</td><td class="pb">${num(s.best, 2)}</td>
+      <td>${cell(s.delta_adj)}</td></tr>`).join('') +
     `</tbody>`;
+}
+
+/* A rotation of bots that never die, each holding the clock for a fixed
+   stretch. The window sets how much damage was on offer, so what varies is the
+   share of it taken -- the one number that reads the same on a scenario
+   offering 0.009 a window and one offering 0.86. */
+function renderWindows(p) {
+  const panel = $('#splitPanel'), rows = p.windows;
+  panel.hidden = false;
+  $('#splitTitle').textContent = 'Bots';
+
+  // Green is the good direction, which is up here and down in the split table
+  // above: there a delta is seconds spent, here it is damage taken.
+  const cell = v => v == null ? '—'
+    : `<span class="${v > 0 ? 'dn' : v < 0 ? 'up' : ''}">${signed(v * 100, 1)}</span>`;
+  // Damage taken over damage offered, weighted by window and computed on the
+  // server -- the mean of three per-window shares is a different number, and
+  // one that appears on no row and in no run.
+  const sum = p.window_summary || {};
+  $('#splitSub').textContent = [
+    `${rows.length} bots`,
+    rows.every(r => r.window_s) ? `${num(rows[0].window_s, 1)}–${num(rows.at(-1).window_s, 1)} s windows` : '',
+    sum.mine == null ? '' : `${pct(sum.mine, 1)} of possible`,
+    sum.base == null ? '' : `PB run ${pct(sum.base, 1)}`
+  ].filter(Boolean).join('  ·  ');
+
+  // The bots you actually lost against the PB on, at most two, for the same
+  // reason the split table marks its worst: a list of five ranks nothing.
+  const worst = rows.filter(r => r.delta != null && r.delta < 0)
+    .sort((a, b) => a.delta - b.delta).slice(0, 2).map(r => r.idx);
+
+  $('#splitTable').innerHTML =
+    `<thead><tr><th>bot</th><th class="barh">share of window</th><th>this run</th>
+       <th>PB run</th><th>Δ PB</th><th>best</th><th>recent</th><th>Δ recent</th></tr></thead><tbody>` +
+    rows.map(r => {
+      const tint = r.delta == null ? '' : r.delta > 0 ? ' dn' : r.delta < 0 ? ' up' : '';
+      const width = r.mine == null ? 0 : clamp(r.mine, 0, 1) * 100;
+      return `<tr class="${worst.includes(r.idx) ? 'w' : ''}">
+        <td class="bot">${r.bot}</td>
+        <td class="barc"><span class="bar${tint}"><i style="width:${width.toFixed(2)}%"></i></span></td>
+        <td>${r.mine == null ? '—' : pct(r.mine, 1)}</td>
+        <td>${r.base == null ? '—' : pct(r.base, 1)}</td>
+        <td>${cell(r.delta)}</td>
+        <td class="pb">${r.best == null ? '—' : pct(r.best, 1)}</td>
+        <td>${r.recent == null ? '—' : pct(r.recent, 1)}</td>
+        <td>${cell(r.delta_recent)}</td></tr>`;
+    }).join('') + `</tbody>`;
 }
 
 /* ═══════════════════════════ HEADLINE ═════════════════════ */
 function renderHeadline(p, isNew) {
   const r = p.run, hl = $('#headline');
   $('#hlScenario').textContent = r.scenario;
-  $('#hlTime').textContent = hhmmss(r.started_at);
+  $('#hlTime').textContent = runStamp(r.started_at);
+  $('#hlTime').title = runTitle(r.started_at);
   $('#hlDur').textContent = num(r.duration_s, 0) + ' s';
   $('#hlCfg').textContent = `${num(r.cm360, 1)} cm/360 · ${r.fov}° · ${r.dpi} dpi`;
   $('#hlScore').textContent = num(r.score, 1);
@@ -456,43 +647,53 @@ function renderHeadline(p, isNew) {
 }
 
 /* ═══════════════════════════ RUN RAIL ═════════════════════ */
-function renderRunList(newId) {
+/* `keepScroll` is what makes the rail loadable: every render re-centres on the
+   focused run, which on an appended page would haul you back to the top the
+   instant the new rows arrived. */
+function renderRunList(newId, keepScroll) {
   const ol = $('#runlist');
   const focused = A.runs.find(r => r.id === A.focusedId);
-  let list = A.runs;
-  if (A.filterScenario) list = list.filter(r => r.scenario === A.filterScenario);
+  const list = A.runs;                   // the server filtered these, not us
 
   $('#railFilter').hidden = !A.filterScenario;
   if (A.filterScenario) $('#railFilter').textContent = A.filterScenario + '  ✕';
 
   if (!list.length) {
-    ol.innerHTML = `<li class="rail-empty">${A.health && A.health.awaiting_perf
+    ol.innerHTML = `<li class="rail-empty">${A.filterScenario
+      ? 'No runs of this scenario yet. Esc clears the filter.'
+      : A.health && A.health.awaiting_perf
       ? 'Building the index from your KovaaK\'s stats folder. Runs appear as they are parsed.'
       : 'No runs yet. Finish a scenario and it shows up here about a second later.'}</li>`;
     $('#railFoot').textContent = '';
     return;
   }
 
-  // per-run delta vs the best earlier run of the same scenario (same language as the headline)
-  const bestBefore = {};
-  const marks = {};
-  [...list].reverse().forEach(r => {
-    const b = bestBefore[r.scenario];
-    marks[r.id] = { d: b == null ? null : (r.score - b) / b, pb: b == null || r.score > b };
-    bestBefore[r.scenario] = b == null ? r.score : Math.max(b, r.score);
-  });
-
+  // The marks arrive already computed, over the whole history rather than over
+  // the rows the rail happens to hold. Folding them here made the answer
+  // depend on the page size: a PB five minutes outside a 100-run window had
+  // the rail calling the next run a personal best while the headline, which
+  // reads all of history, called the same run a loss.
+  //
+  // `best_before` is the best run that came BEFORE this one, so the rail reads
+  // as a ledger -- what you had to beat at the time. The headline measures
+  // against your best ever, which is a different question and can differ on a
+  // run you have since bettered. That is why the number is labelled.
   ol.innerHTML = list.map((r, i) => {
-    const m = marks[r.id], sign = !m.d ? 'flat' : m.d > 0 ? 'up' : 'down';
+    const b = r.best_before;
+    const d = b == null ? null : (r.score - b) / b;
+    const pb = b == null || r.score > b;
+    const sign = !d ? 'flat' : d > 0 ? 'up' : 'down';
+    const mark = d != null ? (d > 0 ? '▲' : d < 0 ? '▼' : '') + Math.abs(d * 100).toFixed(1) + '%'
+      : r.played_before ? '—' : 'first';
     return `<li class="run" role="option" data-id="${r.id}" data-i="${i}"
       aria-selected="${r.id === A.focusedId}"
       data-same="${focused && r.scenario === focused.scenario ? 1 : 0}"
-      data-pb="${m.pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
+      data-pb="${pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
       data-shape="${r.shape || 'timed'}">
-      <span class="t">${hhmm(r.started_at)}</span>
+      <span class="t" title="${runTitle(r.started_at)}">${runTime(r.started_at)}</span>
       <span class="name">${r.scenario}</span>
       <span class="right"><span class="sc">${num(r.score, 1)}</span>
-      <span class="d">${m.d == null ? 'first' : (m.d > 0 ? '▲' : m.d < 0 ? '▼' : '') + Math.abs(m.d * 100).toFixed(1) + '%'}</span></span>
+      <span class="d" title="${RAIL_DELTA_HINT}">${mark}</span></span>
     </li>`;
   }).join('');
 
@@ -500,11 +701,17 @@ function renderRunList(newId) {
     const el = ol.querySelector(`[data-id="${newId}"]`);
     if (el) { el.classList.add('enter'); setTimeout(() => el.classList.remove('enter'), 600); }
   }
-  const sel = ol.querySelector('[aria-selected="true"]');
+  const sel = keepScroll ? null : ol.querySelector('[aria-selected="true"]');
   if (sel) ol.scrollTop = clamp(sel.offsetTop - ol.clientHeight / 2, 0, ol.scrollHeight);
 
-  const pbMark = focused ? list.filter(r => r.scenario === focused.scenario).length : 0;
-  $('#railFoot').innerHTML = `${list.length} runs · ${pbMark} of this scenario · ↑↓ to move, ⏎ to focus`;
+  // The rail holds a window, so the count has to say so: a bare "100 runs"
+  // under a history of 2360 reads as the whole thing. Unfiltered, /api/health
+  // already carries the total, so it costs no extra request; filtered, there
+  // is no cheap total and a trailing + is the honest form.
+  const total = A.health && A.health.runs;
+  $('#railFoot').innerHTML = A.filterScenario
+    ? `${list.length}${A.more ? '+' : ''} runs · ↑↓ to move, esc to clear`
+    : `${list.length}${total ? ' of ' + total : ''} runs · ↑↓ to move, ⏎ to filter`;
 }
 
 /* ═══════════════════════════ SHEETS ═══════════════════════ */
@@ -539,7 +746,7 @@ async function renderSession() {
       const acc = rs.reduce((a, b) => a + b.accuracy, 0) / rs.length;
       return `<tr data-run="${rs.at(-1).id}"><td class="name">${nm}</td><td class="n">${rs.length}</td>
         <td class="n pb">${num(mx, 1)}</td><td class="n">${num(mean, 1)}</td><td class="n">${pct(acc, 1)}</td>
-        <td><div class="bars">${bars}</div></td><td class="n">${hhmm(rs.at(-1).started_at)}</td></tr>`;
+        <td><div class="bars">${bars}</div></td><td class="n" title="${runTitle(rs.at(-1).started_at)}">${runTime(rs.at(-1).started_at)}</td></tr>`;
     }).join('') + '</tbody>';
 }
 
@@ -564,7 +771,8 @@ async function renderScenarios() {
         <td class="n pb">${num(s.pb, 1)}</td><td class="n">${form == null ? '—' : num(form, 1)}</td>
         <td class="n"${relTitle}>${rel == null ? '—' : (rel * 100).toFixed(1) + '%'}</td>
         <td><div class="formbar"><i style="width:${w}%"></i></div></td>
-        <td class="n">${s.last_played ? hhmm(s.last_played) : '—'}</td></tr>`;
+        <td class="n"${s.last_played ? ` title="${runTitle(s.last_played)}"` : ''}>${
+          s.last_played ? runTime(s.last_played) : '—'}</td></tr>`;
     }).join('') + '</tbody>';
 }
 
@@ -588,9 +796,36 @@ async function loadRun(id, isNew) {
   buildSegs();
   renderHeadline(p, isNew);
   renderCharts(p);
-  renderSplits(p);
+  p.windows && p.windows.length ? renderWindows(p) : renderSplits(p);
   renderRunList(isNew ? id : null);
 }
+
+/* The one place a route is acted on: the hash decides the view, the focused
+   run and the rail filter, and nothing else writes those three. */
+async function applyRoute(isNew) {
+  const r = parseHash();
+  if (r.view === 'run') A.filterScenario = r.scenario;   // the filter is run-view state,
+  setView(r.view);                                       // so a sheet route leaves it alone
+
+  // The rail is fetched per filter, so a route naming a different scenario
+  // needs its rows before anything below can resolve a run id against them.
+  if (A.railStale || A.filterScenario !== A.railScenario) await loadRail();
+
+  if (!A.runs.length) { A.payload = null; A.focusedId = null; renderRunList(); return; }
+
+  // A sheet route names no run, so the run view keeps the one it had. A new run
+  // over SSE always takes focus — this is a live dashboard, and a deep link is a
+  // starting point rather than a pin. Anything unknown falls back to the newest.
+  let id = r.view === 'run' ? r.runId : A.focusedId;
+  if (isNew || id == null || !A.runs.some(x => x.id === id)) id = A.runs[0].id;
+  go({ view: r.view, runId: id }, true);                 // URL now names what is shown
+
+  if (isNew || !A.payload || id !== A.focusedId) await loadRun(id, isNew);
+  else renderRunList();                                  // same run, new filter or view
+  A.kbd = $$('.run', $('#runlist')).findIndex(el => +el.dataset.id === id);
+}
+
+addEventListener('hashchange', () => applyRoute(false));
 
 async function refresh(isNew) {
   // Every SSE message lands here with nothing above it to catch a rejection.
@@ -609,8 +844,17 @@ async function refresh(isNew) {
       h.failed ? `${h.failed} unreadable files` : ''
     ].filter(Boolean).join('  ·  ');
 
-    A.runs = await api('/api/runs?limit=100');
-    if (!A.runs.length) {
+    // Mark the rail for reload and let applyRoute fetch it, once, under the
+    // filter the route actually names -- fetching here would mean an unfiltered
+    // page followed immediately by a filtered one on any link that carries a
+    // scenario. A new run is always newer than everything held, so it cannot
+    // change an existing row's marks; `best_before` only looks backwards. The
+    // rail still resets to page one, since a landing run takes focus and
+    // scrolls to the top anyway.
+    A.railStale = true;
+    // The count comes from /api/health, so the empty state is settled without
+    // the rows -- which is what lets the single fetch above be deferred.
+    if (!h.runs) {
       A.payload = null;
       if (uRate) { uRate.destroy(); uRate = null; }
       if (uDelta) { uDelta.destroy(); uDelta = null; }
@@ -630,12 +874,8 @@ async function refresh(isNew) {
       $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
       $('#deltaEmpty').innerHTML = '<span>—</span>';
       $('#splitPanel').hidden = true;
-      renderRunList();
-      return;
     }
-    const focus = (isNew || !A.focusedId || !A.runs.some(r => r.id === A.focusedId)) ? A.runs[0].id : A.focusedId;
-    A.kbd = A.runs.findIndex(r => r.id === focus);
-    await loadRun(focus, isNew);
+    await applyRoute(isNew);
   } catch (err) {
     setStatus('down', 'api error');
   }
@@ -653,15 +893,18 @@ function buildSegs() {
   $('#ctlSmooth').innerHTML = SMOOTH.map(([k, l]) =>
     `<button type="button" role="radio" data-v="${k}" aria-checked="${A.ctrl.smoothing === k}">${l}</button>`).join('');
 }
+loadCtrl();
 buildSegs();
+$('#ctlRecent').value = A.ctrl.recent_n;
+$('#ctlSameCfg').checked = A.ctrl.same_cfg;
 
 $('#ctlMetric').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  A.ctrl.metric = b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+  A.ctrl.metric = b.dataset.v; buildSegs(); saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
 });
 $('#ctlSmooth').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  A.ctrl.smoothing = +b.dataset.v; buildSegs(); if (A.focusedId) loadRun(A.focusedId);
+  A.ctrl.smoothing = +b.dataset.v; buildSegs(); saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
 });
 $('.stepper').addEventListener('click', e => {
   const b = e.target.closest('button[data-step]'); if (!b) return;
@@ -672,14 +915,17 @@ $('.stepper').addEventListener('click', e => {
 $('#ctlRecent').addEventListener('change', e => {
   A.ctrl.recent_n = clamp(+e.target.value || 10, 1, 50);
   e.target.value = A.ctrl.recent_n;
+  saveCtrl();
   if (A.focusedId) loadRun(A.focusedId);
 });
 $('#ctlSameCfg').addEventListener('change', e => {
-  A.ctrl.same_cfg = e.target.checked; if (A.focusedId) loadRun(A.focusedId);
+  // The rail's marks obey this switch too, so the whole page has to reload --
+  // otherwise flipping it moves the headline and leaves the rail behind.
+  A.ctrl.same_cfg = e.target.checked; saveCtrl(); refresh(false);
 });
 
 /* views */
-$$('.vtab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
+$$('.vtab').forEach(t => t.addEventListener('click', () => go({ view: t.dataset.view })));
 function setView(v) {
   A.view = v;
   $$('.vtab').forEach(t => t.setAttribute('aria-selected', t.dataset.view === v));
@@ -691,28 +937,40 @@ function setView(v) {
   if (v === 'run' && uRate) ro.disconnect(), ro.observe($('#chartRate')), ro.observe($('#chartDelta'));
 }
 
-/* run list interaction */
+/* run list interaction — these navigate, and applyRoute does the work */
 $('#runlist').addEventListener('click', e => {
   const li = e.target.closest('.run'); if (!li) return;
-  A.kbd = +li.dataset.i; loadRun(+li.dataset.id);
+  go({ runId: +li.dataset.id });
 });
-$('#railFilter').addEventListener('click', () => { A.filterScenario = null; renderRunList(); });
+$('#railFilter').addEventListener('click', () => go({ scenario: null }));
+
+/* Fetch the next page before the scrollbar actually hits bottom, so the list
+   grows under the cursor instead of stalling at the end of it. */
+$('#runlist').addEventListener('scroll', () => {
+  const ol = $('#runlist');
+  if (ol.scrollTop + ol.clientHeight > ol.scrollHeight - 400) loadMore();
+});
 
 $('#sessionTable').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-run]'); if (!tr) return;
-  setView('run'); loadRun(+tr.dataset.run);
+  // the run picked here can belong to a scenario the rail is filtering out
+  go({ view: 'run', runId: +tr.dataset.run, scenario: null });
 });
 $('#scenTable').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-scenario]'); if (!tr) return;
-  A.filterScenario = tr.dataset.scenario; setView('run');
-  const first = A.runs.find(r => r.scenario === A.filterScenario);
-  if (first) loadRun(first.id); else renderRunList();
+  const name = tr.dataset.scenario;
+  const first = A.runs.find(r => r.scenario === name);
+  go({ view: 'run', scenario: name, runId: first ? first.id : A.focusedId });
 });
 
-/* keyboard: ↑↓ through runs, ⏎ focus, Esc back to the run view */
+/* keyboard: ↑↓ through runs, ⏎ filter the rail by scenario, Esc clear it
+   (Esc backs out of a sheet view instead, where there is no rail) */
 document.addEventListener('keydown', e => {
   if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
-  if (A.view !== 'run') { if (e.key === 'Escape') setView('run'); return; }
+  if (A.view !== 'run') { if (e.key === 'Escape') go({ view: 'run' }); return; }
+  // Ahead of the empty-list guard: a filter matching nothing leaves no items
+  // to move through, and that is exactly when you most want to clear it.
+  if (e.key === 'Escape') { if (A.filterScenario) go({ scenario: null }); return; }
   const items = $$('.run', $('#runlist'));
   if (!items.length) return;
   const move = d => {
@@ -720,13 +978,15 @@ document.addEventListener('keydown', e => {
     items.forEach(el => el.classList.remove('kbd'));
     const el = items[A.kbd]; el.classList.add('kbd');
     $('#runlist').scrollTop = clamp(el.offsetTop - $('#runlist').clientHeight / 2, 0, $('#runlist').scrollHeight);
+    // arrowing is a scrub, not a destination — keep it out of the back stack
+    go({ runId: +el.dataset.id }, true);
     loadRun(+el.dataset.id);
   };
   if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
   else if (e.key === 'Home') { e.preventDefault(); A.kbd = 0; move(0); }
   else if (e.key === 'End') { e.preventDefault(); A.kbd = items.length - 1; move(0); }
-  else if (e.key === 'Enter') { const el = items[clamp(A.kbd, 0, items.length - 1)]; if (el) loadRun(+el.dataset.id); }
+  else if (e.key === 'Enter') { const r = A.runs.find(x => x.id === A.focusedId); if (r) go({ scenario: r.scenario }); }
 });
 
 /* ═══════════════════════════ SSE ══════════════════════════ */
