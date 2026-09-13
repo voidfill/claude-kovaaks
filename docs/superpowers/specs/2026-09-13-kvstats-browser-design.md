@@ -21,6 +21,7 @@ tried, because all three of these are closed and should not be re-litigated:
 | `showDirectoryPicker()` on the install | Blocked: "contains system files" |
 | Junction in the user profile pointing *at* the install | Blocked — Chromium resolves the link and applies the blocklist to the target |
 | Drag-and-drop of the install folder | Blocked — the check is route-independent |
+| Dropping `stats/` alone, deeper in the tree | Blocked — every descendant, not just upper levels |
 
 Also ruled out, for the record: `file://` needs a browser launch flag, native
 messaging needs an extension, Chrome's enterprise policies govern whether a site
@@ -41,8 +42,9 @@ updates, which is exactly the trade Tier 2 makes.
 
 **Tier 1 — live.** The browser holds a `FileSystemDirectoryHandle` on a
 readable directory. The index persists in IndexedDB, updates incrementally, and
-new runs appear without a page reload. Whether the *handle's permission* also
-survives a restart, or costs one click per visit, is Open question 1. Reached
+new runs appear without a page reload. The handle is stored in IndexedDB and its
+permission survives a restart — `queryPermission()` returns `granted` on a fresh
+load with nothing asked, so the folder is chosen once and never again. Reached
 two ways, neither of which the app can tell apart once it has the handle:
 
 - Steam library already outside `Program Files` (a second drive, a custom
@@ -64,10 +66,13 @@ they have seen their own data.
 
 ### The redirect, for the docs
 
-Not yet verified end to end — see Open questions. KovaaK's must be closed.
-No administrator rights are needed: Steam's folder already grants Users write
-access, which is why the game can write stats there unelevated. Verified by
-creating and removing a junction inside the real install.
+Verified end to end on a real install on 2026-09-13: 2,380 stats and 2,070
+`.perf` moved to the profile and junctioned back, a run played in-game landed
+both its `.csv` and its `.perf` in the profile folder, the in-game score history
+still displayed, and Steam's "verify integrity of game files" left the junctions
+untouched. KovaaK's must be closed while the move runs. No administrator rights
+are needed: Steam's folder already grants Users write access, which is why the
+game can write stats there unelevated.
 
 ```bat
 set GAME="C:\Program Files (x86)\Steam\steamapps\common\FPSAimTrainer\FPSAimTrainer"
@@ -118,6 +123,23 @@ Re-opening in Tier 1 does not repeat the 24.7 s. Only names are needed to find
 new files, and a names-only enumeration (`.keys()`, not `.entries()`) costs
 ~2.2 s per directory at this scale. Render from IndexedDB immediately and
 reconcile in the background.
+
+## Live updates
+
+`FileSystemObserver` works: attached to `stats/`, it reported a new file within
+the same second it was written, so there is no polling loop and no 2.2 s sweep
+in the steady state. Keep the names-only enumeration only as the
+reconcile-on-open path, and as a fallback if the constructor is missing.
+
+One new run raises **several** events — `appeared` when the file is created,
+then `modified` as the game writes its contents. The indexer must coalesce
+events per filename and wait for quiet before reading, or it will parse a
+half-written `.csv`. Do not index directly off an event; debounce, then read.
+
+The `.perf` is written a moment after the `.csv` — about two seconds apart in
+testing. A run whose `.perf` has not landed yet should be indexed without a
+curve and upgraded when the second event arrives, which is the same state the
+index already supports for the runs that never get one.
 
 ## Storage
 
@@ -292,29 +314,33 @@ Carry the history across with `git filter-repo`. The format notes in
 `references/kovaaks.md` get duplicated into both; it is prose, and duplicating
 109 lines costs less than a dependency between two repositories.
 
+## Settled by testing
+
+All five questions this design opened were answered on 2026-09-13. Recorded so
+they are not reopened:
+
+1. **A stored handle survives a reload.** `queryPermission()` returns `granted`
+   on a fresh page load having asked nothing. Tier 1 is chosen once, ever — no
+   per-visit click, and no need for a PWA install to earn persistence.
+2. **`FileSystemObserver` fires**, within the same second as the write. See
+   Live updates above for the debounce this requires.
+3. **The redirect works end to end**, including a real run written by the game
+   through the junction.
+4. **Steam's verify-integrity leaves the junctions alone.**
+5. **The blocklist covers every descendant** of `Program Files`, not just its
+   upper levels.
+
 ## Open questions
 
-1. **Does a stored handle survive a reload?** Untested. Handles persist in
-   IndexedDB, but Chrome may return `prompt` from `queryPermission()` on a new
-   session, costing one click per visit. If so, check whether installing the app
-   as a PWA earns persistent permission — that would be a click, not an install.
-   This decides how good Tier 1 actually feels.
-2. **Does `FileSystemObserver` fire?** It exists and attaches to a directory
-   handle successfully (confirmed). It was never observed firing, because
-   nothing wrote to the folder during the test. If it works, live updates cost
-   nothing; if not, fall back to a names-only poll at ~2.2 s per sweep, which
-   caps update latency at roughly 3–5 s for a 12k-run library rather than the
-   Python's ~1 s.
-3. **The redirect, end to end.** Creating a junction inside the install is
-   verified; moving the real `stats/` and `performances/` out and confirming
-   KovaaK's still writes correctly through the junction is not.
-4. **Steam's verify-integrity.** `stats/` is user-generated and not in the depot
-   manifest, so it should be left alone, but this is untested and the docs
-   should not promise it.
-5. **Is the blocklist every descendant of `Program Files`, or only the upper
-   levels?** Everything tried so far was at `FPSAimTrainer` depth or pointed
-   there. Dropping `stats/` alone is one drag and would settle it. Expected to
-   fail; cheap enough to be worth ruling out.
+None blocking. Two worth settling during implementation:
+
+- **How stale may Tier 2 data be?** A returning Tier 2 visitor has their old
+  index in IndexedDB and no way to know whether it is current. Showing it
+  immediately is right; what the app says about its age, and how loudly it
+  offers a re-pick, is a UI decision this spec does not make.
+- **Non-Windows.** The redirect is Windows-specific. Linux and macOS installs
+  put the game elsewhere and are likely reachable by the picker directly, but
+  no one has checked.
 
 ## Out of scope
 
