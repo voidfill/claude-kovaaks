@@ -185,6 +185,63 @@ def candidates(conn, run_id, same_cfg=True, duration_tol=DURATION_TOLERANCE,
     return rows
 
 
+# The rail's marks have to obey exactly the rules `candidates` obeys, or the
+# same pair of runs reads as a personal best in one panel and a loss in the
+# other. Rather than restate them in JavaScript over whatever slice the client
+# happened to fetch, they are expressed once here, as SQL over the whole
+# history, and the rail renders what it is told.
+#
+# `r.cfg_key IS NULL` mirrors `candidates`: the sensitivity filter applies only
+# when the focused run has a sensitivity to filter on.
+_SAME_CFG = "AND (r.cfg_key IS NULL OR p.cfg_key IS r.cfg_key) "
+
+
+# Duration is the score on a race, so judging baselines by it throws the
+# comparison away -- `candidates` skips the filter there and so does this.
+_IN_TOLERANCE = ("AND (r.duration_s IS NULL OR p.duration_s IS NULL "
+                 f"    OR sh.shape = '{shapes.RACE}' "
+                 "     OR abs(p.duration_s - r.duration_s) <= r.duration_s * ?) ")
+
+
+def _prior(same_cfg):
+    return ("WHERE p.scenario = r.scenario AND p.started_at < r.started_at "
+            + (_SAME_CFG if same_cfg else "") + _IN_TOLERANCE)
+
+
+def page(conn, limit, scenario=None, same_cfg=True,
+         duration_tol=DURATION_TOLERANCE):
+    """The newest `limit` runs, each carrying how it stood against its history.
+
+    `best_before` is the best comparable run that came before it -- NULL when
+    there is none -- and `played_before` counts them, so a true debut can be
+    told from a run whose history simply falls outside the page.
+
+    `shape` is already joined for the race rule and `buckets` is one more
+    correlated lookup on a primary key, so both ride along rather than costing
+    the caller a second query per row. `buckets` comes from the curve table,
+    not from run: the rail marks runs with no per-second data, and roughly one
+    run in seven has none. NULL (no curve row) is that marker, so it has to be
+    selected rather than inferred from perf_file, which is set before the
+    `.perf` is parsed.
+
+    The LIMIT is applied before the marks, not after: decorating the whole
+    table and then throwing most of it away costs ~2x on the reference corpus.
+    """
+    prior = _prior(same_cfg)
+    where = "WHERE scenario = ? " if scenario else ""
+    args = ([duration_tol, duration_tol]
+            + ([scenario] if scenario else []) + [limit])
+    return conn.execute(
+        "SELECT r.*, sh.shape AS shape, "
+        f"       (SELECT MAX(p.score) FROM run p {prior}) AS best_before, "
+        f"       (SELECT COUNT(*) FROM run p {prior}) AS played_before, "
+        "       (SELECT buckets FROM curve WHERE curve.run_id = r.id) AS buckets "
+        f"FROM (SELECT id FROM run {where}ORDER BY started_at DESC LIMIT ?) pg "
+        "JOIN run r ON r.id = pg.id "
+        "LEFT JOIN scenario sh ON sh.name = r.scenario "
+        "ORDER BY r.started_at DESC", args).fetchall()
+
+
 def baselines(conn, run_id, recent_n=DEFAULT_RECENT_N, same_cfg=True,
               duration_tol=DURATION_TOLERANCE, shape=shapes.TIMED):
     focus = _focus(conn, run_id)

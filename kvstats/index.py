@@ -14,7 +14,7 @@ from . import perf as perfmod
 from . import shapes
 from . import statscsv
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_TRIES = 5
 
 SCHEMA = """
@@ -36,6 +36,11 @@ CREATE TABLE run (
 );
 CREATE INDEX run_scen_time  ON run(scenario, started_at);
 CREATE INDEX run_scen_score ON run(scenario, score DESC);
+-- The run rail reads newest-first across every scenario. Without this the two
+-- composite indexes above cannot serve that order, so each fetch sorted the
+-- whole table into a temp b-tree -- and a deep page cost more than a shallow
+-- one, which is what a lazily loaded rail cannot afford.
+CREATE INDEX run_time ON run(started_at DESC);
 
 CREATE TABLE curve (
   run_id  INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,

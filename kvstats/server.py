@@ -416,6 +416,25 @@ def _rows(conn, sql, args=()):
     return [{k: r[k] for k in r.keys()} for r in conn.execute(sql, args).fetchall()]
 
 
+# What the rail draws with. `compare.page` selects whole run rows because the
+# comparison rules need most of them; only these reach the client.
+RUN_LIST_COLUMNS = ("id", "scenario", "started_at", "score", "accuracy", "spm",
+                    "cfg_key", "buckets", "shape", "best_before", "played_before")
+
+
+def run_list(conn, limit, scenario=None, same_cfg=True):
+    """The run rail's rows, already marked against the whole history.
+
+    The marks used to be folded in the browser over whatever page had been
+    fetched, which made the answer depend on the page size: a personal best
+    five minutes outside a 100-run window left the rail calling the next run a
+    PB while the headline, reading all of history, called it a loss.
+    """
+    return [{key: row[key] for key in RUN_LIST_COLUMNS}
+            for row in compare.page(conn, limit, scenario=scenario,
+                                    same_cfg=same_cfg)]
+
+
 def make_handler(cfg, conn, subscribers, lock, watcher=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -497,31 +516,15 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
                     "watcher_errors": watcher.stats["errors"] if watcher else 0,
                 })
 
-            # buckets comes from the curve table, not run: the run list marks
-            # runs with no per-second data, and roughly one run in seven has
-            # none. NULL (no curve row) is the marker, so it must be selected
-            # rather than inferred from perf_file, which is set before the
-            # .perf is parsed.
             if route == "/api/runs":
                 scenario = one("scenario")
                 try:
                     limit = _bounded_int(one("limit", "50"), 0, MAX_LIMIT)
                 except ValueError as error:
                     return self._json({"error": str(error)}, 400)
-                if scenario:
-                    return self._json(_rows(
-                        conn,
-                        "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                        "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
-                        "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
-                        "FROM run WHERE scenario=? ORDER BY started_at DESC LIMIT ?",
-                        (scenario, limit)))
-                return self._json(_rows(
-                    conn,
-                    "SELECT id, scenario, started_at, score, accuracy, spm, cfg_key, "
-                    "(SELECT buckets FROM curve WHERE curve.run_id = run.id) AS buckets, "
-                    "(SELECT shape FROM scenario WHERE name = run.scenario) AS shape "
-                    "FROM run ORDER BY started_at DESC LIMIT ?", (limit,)))
+                return self._json(run_list(
+                    conn, limit, scenario=scenario or None,
+                    same_cfg=one("same_cfg", "1") != "0"))
 
             if route == "/api/scenarios":
                 return self._json(_rows(conn, """

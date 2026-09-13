@@ -238,6 +238,80 @@ class RunPayload(ServerBase):
             self.assertEqual(len(band[series]), payload["run"]["buckets"])
 
 
+class RunList(ServerBase):
+    """`/api/runs` is the rail's whole world. It has to arrive already marked:
+    the client cannot work out how a run stood against its history from a page
+    that does not contain that history."""
+
+    def test_every_row_says_how_it_stood_against_its_own_history(self):
+        rows = json.loads(json.dumps(server.run_list(self.conn, limit=50)))
+        self.assertEqual(len(rows), 11)
+        for row in rows:
+            self.assertIn("best_before", row)
+            self.assertIn("played_before", row)
+
+        # VT Ground Intermediate S5 is played twice in the fixtures, 1814 then
+        # 2009 -- so the later run has something to have beaten.
+        ground = [r for r in rows if r["scenario"] == "VT Ground Intermediate S5"]
+        ground.sort(key=lambda r: r["started_at"])
+        self.assertEqual([r["played_before"] for r in ground], [0, 1])
+        self.assertIsNone(ground[0]["best_before"])
+        self.assertEqual(ground[1]["best_before"], 1814.0)
+
+    def test_the_rows_carry_what_the_rail_draws_with(self):
+        """buckets marks the runs with no curve and shape picks the row's icon;
+        both were already in the payload and must survive the rewrite."""
+        rows = server.run_list(self.conn, limit=50)
+        by_id = {r["id"]: r for r in rows}
+        curved = self.conn.execute(
+            "SELECT run_id, buckets FROM curve LIMIT 1").fetchone()
+        self.assertEqual(by_id[curved[0]]["buckets"], curved[1])
+        flat = self.conn.execute(
+            "SELECT id FROM run WHERE perf_file IS NULL LIMIT 1").fetchone()[0]
+        self.assertIsNone(by_id[flat]["buckets"])
+        self.assertEqual(by_id[curved[0]]["shape"],
+                         self.conn.execute(
+                             "SELECT shape FROM scenario WHERE name=?",
+                             (by_id[curved[0]]["scenario"],)).fetchone()[0])
+
+    def test_the_route_serves_the_marks_and_honours_the_sens_toggle(self):
+        """The rail's marks must follow the same cm/360 switch the headline
+        follows, or flipping it changes one panel and not the other."""
+        self.conn.execute(
+            "INSERT INTO run(scenario, started_at, stats_file, score, cfg_key, "
+            "duration_s, shots, hits, misses) "
+            "VALUES('VT Ground Intermediate S5', '2026-06-16T20:50:00', "
+            "       'synthetic', 2500, '99.9', 59.99, 0, 0, 0)")
+        self.conn.commit()
+
+        httpd = server.make_server(self.cfg, self.conn, port=0)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        def fetch(query):
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/runs?{query}", timeout=5) as r:
+                return {row["id"]: row for row in json.loads(r.read())}
+
+        new_id = self.conn.execute(
+            "SELECT id FROM run WHERE stats_file='synthetic'").fetchone()[0]
+
+        strict = fetch("limit=50")[new_id]
+        self.assertIsNone(strict["best_before"],
+                          "2009 was set at another sensitivity")
+        self.assertEqual(strict["played_before"], 0)
+
+        relaxed = fetch("limit=50&same_cfg=0")[new_id]
+        self.assertEqual(relaxed["best_before"], 2009.0)
+        self.assertEqual(relaxed["played_before"], 2)
+
+    def test_one_scenario_can_be_asked_for_on_its_own(self):
+        rows = server.run_list(self.conn, limit=50, scenario="Air Pure Medium")
+        self.assertEqual({r["scenario"] for r in rows}, {"Air Pure Medium"})
+        self.assertEqual(len(rows), 2)
+
+
 class LiveServer(ServerBase):
     def test_the_api_answers_over_real_http_from_a_server_thread(self):
         """The one test that exercises the real concurrency path.

@@ -37,6 +37,9 @@ const METRICS = [
 // series unchanged for window <= 1), so "raw" is sent as 0.
 const SMOOTH = [[0, 'raw'], [3, '3 s'], [5, '5 s']];
 const isRatio = m => m === 'accuracy' || m === 'efficiency';
+// The rail is a ledger and the headline is a verdict. Saying so on the number
+// itself is what lets the two legitimately differ on a run you later bettered.
+const RAIL_DELTA_HINT = 'against your best before this run';
 
 /* ── app state ───────────────────────────────────────────── */
 const A = {
@@ -580,26 +583,32 @@ function renderRunList(newId) {
     return;
   }
 
-  // per-run delta vs the best earlier run of the same scenario (same language as the headline)
-  const bestBefore = {};
-  const marks = {};
-  [...list].reverse().forEach(r => {
-    const b = bestBefore[r.scenario];
-    marks[r.id] = { d: b == null ? null : (r.score - b) / b, pb: b == null || r.score > b };
-    bestBefore[r.scenario] = b == null ? r.score : Math.max(b, r.score);
-  });
-
+  // The marks arrive already computed, over the whole history rather than over
+  // the rows the rail happens to hold. Folding them here made the answer
+  // depend on the page size: a PB five minutes outside a 100-run window had
+  // the rail calling the next run a personal best while the headline, which
+  // reads all of history, called the same run a loss.
+  //
+  // `best_before` is the best run that came BEFORE this one, so the rail reads
+  // as a ledger -- what you had to beat at the time. The headline measures
+  // against your best ever, which is a different question and can differ on a
+  // run you have since bettered. That is why the number is labelled.
   ol.innerHTML = list.map((r, i) => {
-    const m = marks[r.id], sign = !m.d ? 'flat' : m.d > 0 ? 'up' : 'down';
+    const b = r.best_before;
+    const d = b == null ? null : (r.score - b) / b;
+    const pb = b == null || r.score > b;
+    const sign = !d ? 'flat' : d > 0 ? 'up' : 'down';
+    const mark = d != null ? (d > 0 ? '▲' : d < 0 ? '▼' : '') + Math.abs(d * 100).toFixed(1) + '%'
+      : r.played_before ? '—' : 'first';
     return `<li class="run" role="option" data-id="${r.id}" data-i="${i}"
       aria-selected="${r.id === A.focusedId}"
       data-same="${focused && r.scenario === focused.scenario ? 1 : 0}"
-      data-pb="${m.pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
+      data-pb="${pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
       data-shape="${r.shape || 'timed'}">
       <span class="t">${hhmm(r.started_at)}</span>
       <span class="name">${r.scenario}</span>
       <span class="right"><span class="sc">${num(r.score, 1)}</span>
-      <span class="d">${m.d == null ? 'first' : (m.d > 0 ? '▲' : m.d < 0 ? '▼' : '') + Math.abs(m.d * 100).toFixed(1) + '%'}</span></span>
+      <span class="d" title="${RAIL_DELTA_HINT}">${mark}</span></span>
     </li>`;
   }).join('');
 
@@ -741,7 +750,7 @@ async function refresh(isNew) {
       h.failed ? `${h.failed} unreadable files` : ''
     ].filter(Boolean).join('  ·  ');
 
-    A.runs = await api('/api/runs?limit=100');
+    A.runs = await api(`/api/runs?limit=100&same_cfg=${A.ctrl.same_cfg ? 1 : 0}`);
     if (!A.runs.length) {
       A.payload = null;
       if (uRate) { uRate.destroy(); uRate = null; }
@@ -807,7 +816,9 @@ $('#ctlRecent').addEventListener('change', e => {
   if (A.focusedId) loadRun(A.focusedId);
 });
 $('#ctlSameCfg').addEventListener('change', e => {
-  A.ctrl.same_cfg = e.target.checked; saveCtrl(); if (A.focusedId) loadRun(A.focusedId);
+  // The rail's marks obey this switch too, so the whole page has to reload --
+  // otherwise flipping it moves the headline and leaves the rail behind.
+  A.ctrl.same_cfg = e.target.checked; saveCtrl(); refresh(false);
 });
 
 /* views */
