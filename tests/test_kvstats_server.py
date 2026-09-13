@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -273,6 +274,45 @@ class RunList(ServerBase):
                          self.conn.execute(
                              "SELECT shape FROM scenario WHERE name=?",
                              (by_id[curved[0]]["scenario"],)).fetchone()[0])
+
+    def test_the_rail_can_ask_for_the_runs_older_than_the_one_it_has(self):
+        """How the rail loads more as you scroll. The cursor is a run id, so
+        the client hands back the last row it drew rather than an offset that
+        shifts under it when a run lands mid-scroll."""
+        first = server.run_list(self.conn, limit=4)
+        older = server.run_list(self.conn, limit=4, before=first[-1]["id"])
+
+        self.assertEqual(len(first), 4)
+        self.assertTrue(older, "11 fixture runs, so there is a second page")
+        self.assertFalse({r["id"] for r in first} & {r["id"] for r in older},
+                         "the pages must not overlap")
+        self.assertLess(older[0]["started_at"], first[-1]["started_at"])
+
+        rest = server.run_list(self.conn, limit=50, before=older[-1]["id"])
+        self.assertEqual(len(first) + len(older) + len(rest), 11,
+                         "and together they must be the whole history")
+
+    def test_a_bad_cursor_is_refused_rather_than_handed_to_sqlite(self):
+        """`limit` is already bounds-checked because a negative one means `no
+        limit` to SQLite and a huge one overflows it. `before` reaches the same
+        query, so it gets the same treatment rather than a 500 from the handler
+        thread."""
+        httpd = server.make_server(self.cfg, self.conn, port=0)
+        self.addCleanup(httpd.shutdown)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        for bad in ("abc", "-1", "99999999999999999999999"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/runs?before={bad}", timeout=5)
+            self.assertEqual(caught.exception.code, 400, f"before={bad}")
+
+        # an id that is simply not there is a valid question with an empty
+        # answer, not a bad request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/runs?before=999999", timeout=5) as r:
+            self.assertEqual(json.loads(r.read()), [])
 
     def test_the_route_serves_the_marks_and_honours_the_sens_toggle(self):
         """The rail's marks must follow the same cm/360 switch the headline

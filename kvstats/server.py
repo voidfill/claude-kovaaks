@@ -422,17 +422,20 @@ RUN_LIST_COLUMNS = ("id", "scenario", "started_at", "score", "accuracy", "spm",
                     "cfg_key", "buckets", "shape", "best_before", "played_before")
 
 
-def run_list(conn, limit, scenario=None, same_cfg=True):
+def run_list(conn, limit, scenario=None, before=None, same_cfg=True):
     """The run rail's rows, already marked against the whole history.
 
     The marks used to be folded in the browser over whatever page had been
     fetched, which made the answer depend on the page size: a personal best
     five minutes outside a 100-run window left the rail calling the next run a
     PB while the headline, reading all of history, called it a loss.
+
+    `before` is the id of the last row the rail already holds; the page picks
+    up at the run just older than it.
     """
     return [{key: row[key] for key in RUN_LIST_COLUMNS}
             for row in compare.page(conn, limit, scenario=scenario,
-                                    same_cfg=same_cfg)]
+                                    before=before, same_cfg=same_cfg)]
 
 
 def make_handler(cfg, conn, subscribers, lock, watcher=None):
@@ -518,12 +521,19 @@ def make_handler(cfg, conn, subscribers, lock, watcher=None):
 
             if route == "/api/runs":
                 scenario = one("scenario")
+                before = one("before")
                 try:
                     limit = _bounded_int(one("limit", "50"), 0, MAX_LIMIT)
+                    # A cursor reaches the same query `limit` does, so it gets
+                    # the same bounds check rather than a 500 from deep inside
+                    # conn.execute. An id that is merely absent is a valid
+                    # question with an empty answer, and is not checked here.
+                    if before is not None:
+                        before = _bounded_int(before, 1, SQLITE_INT_MAX)
                 except ValueError as error:
                     return self._json({"error": str(error)}, 400)
                 return self._json(run_list(
-                    conn, limit, scenario=scenario or None,
+                    conn, limit, scenario=scenario or None, before=before,
                     same_cfg=one("same_cfg", "1") != "0"))
 
             if route == "/api/scenarios":

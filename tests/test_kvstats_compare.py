@@ -81,17 +81,22 @@ class SyntheticRuns:
     def add(self, scenario, started_at, score, cfg_key="52.0",
             duration=60.0, curve=None):
         """Insert a synthetic run, optionally with a curve."""
+        # KovaaK's names every stats file distinctly even for runs that finish
+        # in the same second, so the counter is what keeps these realistic --
+        # without it a same-timestamp pair trips the UNIQUE on stats_file.
+        self.written = getattr(self, "written", 0) + 1
         cursor = self.conn.execute(
             "INSERT INTO run(scenario, started_at, stats_file, score, cfg_key, "
             "duration_s, shots, hits, misses) VALUES(?,?,?,?,?,?,0,0,0)",
-            (scenario, started_at, f"{scenario}-{started_at}", score, cfg_key,
-             duration))
+            (scenario, started_at, f"{scenario}-{started_at}-{self.written}",
+             score, cfg_key, duration))
         run_id = cursor.lastrowid
         if curve is not None:
             # baselines() treats a run as drawable only when perf_file is set,
             # so a synthetic curve must come with one.
-            self.conn.execute("UPDATE run SET perf_file=? WHERE id=?",
-                              (f"{scenario}-{started_at}.perf", run_id))
+            self.conn.execute(
+                "UPDATE run SET perf_file=? WHERE id=?",
+                (f"{scenario}-{started_at}-{self.written}.perf", run_id))
             import array
             from kvstats import perf as perfmod
             blobs = []
@@ -286,6 +291,56 @@ class RunPage(SyntheticRuns, unittest.TestCase):
                 "SELECT id FROM run ORDER BY started_at DESC LIMIT 5"))
         self.assertNotIn("TEMP B-TREE", plan,
                          f"the newest-first read still sorts the table: {plan}")
+
+
+    def test_paging_older_walks_the_whole_history_without_gaps(self):
+        """The rail loads more as you scroll, so the pages have to tile: every
+        run exactly once, newest first, however they are cut up."""
+        for hour in range(10):
+            self.add("S", f"2026-01-01{'T%02d:00:00' % hour}", 100 + hour)
+
+        # Bounded deliberately. A cursor that fails to advance -- `<=` instead
+        # of `<` on the row value, say -- makes this walk forever, and a suite
+        # that hangs is worse than one that fails.
+        seen, cursor = [], None
+        for _ in range(10):
+            rows = compare.page(self.conn, limit=3, before=cursor)
+            if not rows:
+                break
+            seen += [r["id"] for r in rows]
+            cursor = rows[-1]["id"]
+        else:
+            self.fail(f"the cursor never reached the end: {len(seen)} rows seen")
+
+        every = [r[0] for r in self.conn.execute(
+            "SELECT id FROM run ORDER BY started_at DESC, id DESC")]
+        self.assertEqual(seen, every, "the pages must tile the history exactly")
+
+    def test_a_later_page_is_still_marked_against_runs_it_cannot_see(self):
+        """The reason the marks are computed server-side. A run's history is
+        OLDER than it, so it sits on pages the client has not fetched yet --
+        page two must already know what page five contains."""
+        self.add("S", "2026-01-01T10:00:00", 900)      # the PB, five pages down
+        for hour in range(11, 21):
+            self.add("S", f"2026-01-01T{hour}:00:00", 100 + hour)
+
+        second = compare.page(self.conn, limit=3,
+                              before=compare.page(self.conn, limit=3)[-1]["id"])
+        for row in second:
+            self.assertEqual(row["best_before"], 900,
+                             "the unfetched 900 still has to count")
+
+    def test_runs_sharing_a_timestamp_are_neither_dropped_nor_repeated(self):
+        """`started_at` has second resolution and no uniqueness constraint. A
+        cursor on time alone would skip a run on the page boundary; the cursor
+        is the whole (time, id) pair so a tie cannot straddle it."""
+        for _ in range(4):
+            self.add("S", "2026-01-01T10:00:00", 100)
+
+        first = compare.page(self.conn, limit=2)
+        second = compare.page(self.conn, limit=2, before=first[-1]["id"])
+        ids = [r["id"] for r in first] + [r["id"] for r in second]
+        self.assertEqual(len(set(ids)), 4, f"all four runs, each once: {ids}")
 
 
 class RunPageMatchesBaselines(SyntheticRuns, unittest.TestCase):

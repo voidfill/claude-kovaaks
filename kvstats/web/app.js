@@ -46,7 +46,12 @@ const A = {
   view: 'run',
   ctrl: { metric: 'score', smoothing: 0, recent_n: 10, same_cfg: true },
   runs: [], payload: null, focusedId: null, kbd: -1,
-  filterScenario: null, health: null
+  filterScenario: null, health: null,
+  // The rail is a window onto the history, not the whole of it. `railScenario`
+  // is the filter `runs` was actually fetched under, `more` says whether the
+  // server had further rows, and `railGen` retires a page fetch whose rail was
+  // replaced while it was in flight.
+  more: false, loading: false, railScenario: null, railStale: true, railGen: 0
 };
 
 /* ── chart controls persist locally ──────────────────────── */
@@ -107,6 +112,51 @@ async function api(path) {
   const r = await fetch(API + path);
   if (!r.ok) throw new Error(r.status);
   return r.json();
+}
+
+/* The rail loads a page at a time and grows as you scroll. 100 runs reached
+   back only four days on the reference history, which is nothing like enough
+   to find the session you are looking for.
+
+   Filtering is the server's job now rather than a filter() over whatever had
+   been fetched — with a partial list in hand, filtering in the browser would
+   quietly show a subset of a scenario and call it all of it. */
+const RAIL_PAGE = 100;
+
+function railQuery(extra) {
+  return `/api/runs?limit=${RAIL_PAGE}&same_cfg=${A.ctrl.same_cfg ? 1 : 0}`
+    + (A.filterScenario ? '&scenario=' + encodeURIComponent(A.filterScenario) : '')
+    + extra;
+}
+
+async function loadRail() {
+  const gen = ++A.railGen;
+  const rows = await api(railQuery(''));
+  if (gen !== A.railGen) return;                  // a newer load already won
+  A.runs = rows;
+  A.more = rows.length === RAIL_PAGE;
+  A.railScenario = A.filterScenario;
+  A.railStale = false;
+}
+
+/* Older runs, keyed off the last row we hold rather than an offset: a run
+   landing while you scroll shifts every offset by one, and the rail would
+   either repeat a row or skip one. */
+async function loadMore() {
+  if (A.loading || !A.more || !A.runs.length) return;
+  A.loading = true;
+  const gen = A.railGen;
+  try {
+    const older = await api(railQuery('&before=' + A.runs[A.runs.length - 1].id));
+    if (gen !== A.railGen) return;                // the rail was replaced under us
+    A.runs = A.runs.concat(older);
+    A.more = older.length === RAIL_PAGE;
+    renderRunList(null, true);
+  } catch (err) {
+    setStatus('down', 'api error');
+  } finally {
+    A.loading = false;
+  }
 }
 
 /* ═══════════════════════════ CHARTS ═══════════════════════ */
@@ -566,17 +616,21 @@ function renderHeadline(p, isNew) {
 }
 
 /* ═══════════════════════════ RUN RAIL ═════════════════════ */
-function renderRunList(newId) {
+/* `keepScroll` is what makes the rail loadable: every render re-centres on the
+   focused run, which on an appended page would haul you back to the top the
+   instant the new rows arrived. */
+function renderRunList(newId, keepScroll) {
   const ol = $('#runlist');
   const focused = A.runs.find(r => r.id === A.focusedId);
-  let list = A.runs;
-  if (A.filterScenario) list = list.filter(r => r.scenario === A.filterScenario);
+  const list = A.runs;                   // the server filtered these, not us
 
   $('#railFilter').hidden = !A.filterScenario;
   if (A.filterScenario) $('#railFilter').textContent = A.filterScenario + '  ✕';
 
   if (!list.length) {
-    ol.innerHTML = `<li class="rail-empty">${A.health && A.health.awaiting_perf
+    ol.innerHTML = `<li class="rail-empty">${A.filterScenario
+      ? 'No runs of this scenario yet. Esc clears the filter.'
+      : A.health && A.health.awaiting_perf
       ? 'Building the index from your KovaaK\'s stats folder. Runs appear as they are parsed.'
       : 'No runs yet. Finish a scenario and it shows up here about a second later.'}</li>`;
     $('#railFoot').textContent = '';
@@ -616,13 +670,17 @@ function renderRunList(newId) {
     const el = ol.querySelector(`[data-id="${newId}"]`);
     if (el) { el.classList.add('enter'); setTimeout(() => el.classList.remove('enter'), 600); }
   }
-  const sel = ol.querySelector('[aria-selected="true"]');
+  const sel = keepScroll ? null : ol.querySelector('[aria-selected="true"]');
   if (sel) ol.scrollTop = clamp(sel.offsetTop - ol.clientHeight / 2, 0, ol.scrollHeight);
 
-  const pbMark = focused ? list.filter(r => r.scenario === focused.scenario).length : 0;
+  // The rail holds a window, so the count has to say so: a bare "100 runs"
+  // under a history of 2360 reads as the whole thing. Unfiltered, /api/health
+  // already carries the total, so it costs no extra request; filtered, there
+  // is no cheap total and a trailing + is the honest form.
+  const total = A.health && A.health.runs;
   $('#railFoot').innerHTML = A.filterScenario
-    ? `${list.length} runs · ↑↓ to move, esc to clear`
-    : `${list.length} runs · ${pbMark} of this scenario · ↑↓ to move, ⏎ to filter`;
+    ? `${list.length}${A.more ? '+' : ''} runs · ↑↓ to move, esc to clear`
+    : `${list.length}${total ? ' of ' + total : ''} runs · ↑↓ to move, ⏎ to filter`;
 }
 
 /* ═══════════════════════════ SHEETS ═══════════════════════ */
@@ -717,6 +775,10 @@ async function applyRoute(isNew) {
   if (r.view === 'run') A.filterScenario = r.scenario;   // the filter is run-view state,
   setView(r.view);                                       // so a sheet route leaves it alone
 
+  // The rail is fetched per filter, so a route naming a different scenario
+  // needs its rows before anything below can resolve a run id against them.
+  if (A.railStale || A.filterScenario !== A.railScenario) await loadRail();
+
   if (!A.runs.length) { A.payload = null; A.focusedId = null; renderRunList(); return; }
 
   // A sheet route names no run, so the run view keeps the one it had. A new run
@@ -750,8 +812,17 @@ async function refresh(isNew) {
       h.failed ? `${h.failed} unreadable files` : ''
     ].filter(Boolean).join('  ·  ');
 
-    A.runs = await api(`/api/runs?limit=100&same_cfg=${A.ctrl.same_cfg ? 1 : 0}`);
-    if (!A.runs.length) {
+    // Mark the rail for reload and let applyRoute fetch it, once, under the
+    // filter the route actually names -- fetching here would mean an unfiltered
+    // page followed immediately by a filtered one on any link that carries a
+    // scenario. A new run is always newer than everything held, so it cannot
+    // change an existing row's marks; `best_before` only looks backwards. The
+    // rail still resets to page one, since a landing run takes focus and
+    // scrolls to the top anyway.
+    A.railStale = true;
+    // The count comes from /api/health, so the empty state is settled without
+    // the rows -- which is what lets the single fetch above be deferred.
+    if (!h.runs) {
       A.payload = null;
       if (uRate) { uRate.destroy(); uRate = null; }
       if (uDelta) { uDelta.destroy(); uDelta = null; }
@@ -840,6 +911,13 @@ $('#runlist').addEventListener('click', e => {
   go({ runId: +li.dataset.id });
 });
 $('#railFilter').addEventListener('click', () => go({ scenario: null }));
+
+/* Fetch the next page before the scrollbar actually hits bottom, so the list
+   grows under the cursor instead of stalling at the end of it. */
+$('#runlist').addEventListener('scroll', () => {
+  const ol = $('#runlist');
+  if (ol.scrollTop + ol.clientHeight > ol.scrollHeight - 400) loadMore();
+});
 
 $('#sessionTable').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-run]'); if (!tr) return;

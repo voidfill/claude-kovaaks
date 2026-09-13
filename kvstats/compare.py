@@ -208,7 +208,7 @@ def _prior(same_cfg):
             + (_SAME_CFG if same_cfg else "") + _IN_TOLERANCE)
 
 
-def page(conn, limit, scenario=None, same_cfg=True,
+def page(conn, limit, scenario=None, before=None, same_cfg=True,
          duration_tol=DURATION_TOLERANCE):
     """The newest `limit` runs, each carrying how it stood against its history.
 
@@ -226,20 +226,33 @@ def page(conn, limit, scenario=None, same_cfg=True,
 
     The LIMIT is applied before the marks, not after: decorating the whole
     table and then throwing most of it away costs ~2x on the reference corpus.
+
+    `before` is a run id, and the page starts at the run just older than it.
+    The cursor is the whole (started_at, id) pair, compared as a row value:
+    `started_at` has second resolution and no uniqueness constraint, so a
+    cursor on time alone would drop a run whose timestamp straddled a page
+    boundary. Paging this way rather than by OFFSET keeps a deep page the same
+    cost as a shallow one, and cannot skip or repeat a run when one lands
+    while the rail is being scrolled.
     """
     prior = _prior(same_cfg)
-    where = "WHERE scenario = ? " if scenario else ""
+    clauses = (["scenario = ?"] if scenario else []) + (
+        ["(started_at, id) < (SELECT started_at, id FROM run WHERE id = ?)"]
+        if before is not None else [])
+    where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
     args = ([duration_tol, duration_tol]
-            + ([scenario] if scenario else []) + [limit])
+            + ([scenario] if scenario else [])
+            + ([before] if before is not None else []) + [limit])
     return conn.execute(
         "SELECT r.*, sh.shape AS shape, "
         f"       (SELECT MAX(p.score) FROM run p {prior}) AS best_before, "
         f"       (SELECT COUNT(*) FROM run p {prior}) AS played_before, "
         "       (SELECT buckets FROM curve WHERE curve.run_id = r.id) AS buckets "
-        f"FROM (SELECT id FROM run {where}ORDER BY started_at DESC LIMIT ?) pg "
+        f"FROM (SELECT id FROM run {where}"
+        "      ORDER BY started_at DESC, id DESC LIMIT ?) pg "
         "JOIN run r ON r.id = pg.id "
         "LEFT JOIN scenario sh ON sh.name = r.scenario "
-        "ORDER BY r.started_at DESC", args).fetchall()
+        "ORDER BY r.started_at DESC, r.id DESC", args).fetchall()
 
 
 def baselines(conn, run_id, recent_n=DEFAULT_RECENT_N, same_cfg=True,
