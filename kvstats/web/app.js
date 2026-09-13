@@ -13,8 +13,38 @@ const pad2 = n => String(n).padStart(2, '0');
 const num = (v, d = 1) => v == null || !isFinite(v) ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const pct = (v, d = 1) => v == null ? '—' : (v * 100).toFixed(d) + '%';
 const signed = (v, d = 1) => (v > 0 ? '+' : v < 0 ? '−' : '') + num(Math.abs(v), d);
-const hhmm = iso => { const t = new Date(iso); return pad2(t.getHours()) + ':' + pad2(t.getMinutes()); };
-const hhmmss = iso => hhmm(iso) + ':' + pad2(new Date(iso).getSeconds());
+/* A run's time reads as a clock if it happened today and as a date if it did
+   not: what you want to know about a run from last week is which day, not which
+   minute. `started_at` is a naive local ISO string and Date parses it as local,
+   which is the clock KovaaK's wrote it by -- there is no zone to convert.
+
+   Every place one of these is shown also carries runTitle() on hover, so the
+   exact stamp is never more than a pointer away. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() &&
+                          a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const clock = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+
+const runTime = iso => {
+  const d = new Date(iso), now = new Date();
+  if (sameDay(d, now)) return clock(d);
+  // The year only earns its space when it is not the current one.
+  return MONTHS[d.getMonth()] + ' ' + d.getDate() +
+         (d.getFullYear() === now.getFullYear() ? '' : ' ' + d.getFullYear());
+};
+
+/* The headline names one particular run rather than placing it in a list, and
+   seconds are what tell two runs of the same scenario apart -- so it keeps them,
+   and gains the date only when the run is not today's. */
+const runStamp = iso => {
+  const d = new Date(iso);
+  const time = clock(d) + ':' + pad2(d.getSeconds());
+  return sameDay(d, new Date()) ? time : runTime(iso) + ' ' + time;
+};
+
+const runTitle = iso => new Date(iso).toLocaleString('en-US',
+  { dateStyle: 'full', timeStyle: 'medium' });
 
 const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 let C = {};
@@ -404,7 +434,7 @@ function renderCharts(p) {
 
   if (!hasCurve) {
     $('#rateEmpty').innerHTML = p.run.buckets === 0
-      ? `<strong>no per-second data</strong><span>KovaaK's wrote no <code>.perf</code> file for this run, so only the totals above are known. Roughly one run in seven lands this way.</span>`
+      ? `<strong>no per-second data</strong><span>KovaaK's wrote no <code>.perf</code> file for this run, so only the totals above are known.</span>`
       : `<strong>waiting for curve</strong><span>The run landed but its per-second file has not been parsed yet.</span>`;
     $('#chartDelta').hidden = true; $('#deltaEmpty').hidden = false;
     $('#deltaEmpty').innerHTML = `<span>Nothing to compare second by second.</span>`;
@@ -553,7 +583,8 @@ function renderWindows(p) {
 function renderHeadline(p, isNew) {
   const r = p.run, hl = $('#headline');
   $('#hlScenario').textContent = r.scenario;
-  $('#hlTime').textContent = hhmmss(r.started_at);
+  $('#hlTime').textContent = runStamp(r.started_at);
+  $('#hlTime').title = runTitle(r.started_at);
   $('#hlDur').textContent = num(r.duration_s, 0) + ' s';
   $('#hlCfg').textContent = `${num(r.cm360, 1)} cm/360 · ${r.fov}° · ${r.dpi} dpi`;
   $('#hlScore').textContent = num(r.score, 1);
@@ -659,7 +690,7 @@ function renderRunList(newId, keepScroll) {
       data-same="${focused && r.scenario === focused.scenario ? 1 : 0}"
       data-pb="${pb ? 1 : 0}" data-nocurve="${r.buckets ? 0 : 1}" data-sign="${sign}"
       data-shape="${r.shape || 'timed'}">
-      <span class="t">${hhmm(r.started_at)}</span>
+      <span class="t" title="${runTitle(r.started_at)}">${runTime(r.started_at)}</span>
       <span class="name">${r.scenario}</span>
       <span class="right"><span class="sc">${num(r.score, 1)}</span>
       <span class="d" title="${RAIL_DELTA_HINT}">${mark}</span></span>
@@ -715,7 +746,7 @@ async function renderSession() {
       const acc = rs.reduce((a, b) => a + b.accuracy, 0) / rs.length;
       return `<tr data-run="${rs.at(-1).id}"><td class="name">${nm}</td><td class="n">${rs.length}</td>
         <td class="n pb">${num(mx, 1)}</td><td class="n">${num(mean, 1)}</td><td class="n">${pct(acc, 1)}</td>
-        <td><div class="bars">${bars}</div></td><td class="n">${hhmm(rs.at(-1).started_at)}</td></tr>`;
+        <td><div class="bars">${bars}</div></td><td class="n" title="${runTitle(rs.at(-1).started_at)}">${runTime(rs.at(-1).started_at)}</td></tr>`;
     }).join('') + '</tbody>';
 }
 
@@ -740,7 +771,8 @@ async function renderScenarios() {
         <td class="n pb">${num(s.pb, 1)}</td><td class="n">${form == null ? '—' : num(form, 1)}</td>
         <td class="n"${relTitle}>${rel == null ? '—' : (rel * 100).toFixed(1) + '%'}</td>
         <td><div class="formbar"><i style="width:${w}%"></i></div></td>
-        <td class="n">${s.last_played ? hhmm(s.last_played) : '—'}</td></tr>`;
+        <td class="n"${s.last_played ? ` title="${runTitle(s.last_played)}"` : ''}>${
+          s.last_played ? runTime(s.last_played) : '—'}</td></tr>`;
     }).join('') + '</tbody>';
 }
 
