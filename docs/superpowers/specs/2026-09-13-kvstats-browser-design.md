@@ -1,198 +1,165 @@
-# kvstats in the browser
+# kvstats in the browser, read-only
 
-A zero-install web version of the kvstats dashboard, with two ways in: a live
-one for people who can give the browser a readable path, and a one-shot upload
-for everyone else. The upload path exists so that nobody has to run a command
-before they know whether the tool is worth it.
+A zero-install history browser for KovaaK's runs: open a link, point it at your
+game folder, see every run you have ever played. No install, no terminal, no
+account, and nothing leaves the machine.
 
-Status: design. Measured against a synthetic 12,000-run corpus on 2026-09-13;
-every number below is observed, not estimated. The probe that produced them is
-throwaway and is not part of this design.
+This is step one of three. Live updates are
+[live updates](2026-09-13-kvstats-live-updates-design.md); getting a *watchable*
+folder out of a default install is
+[reaching the install](2026-09-13-kvstats-reaching-the-install.md). Neither is
+required for this document to ship, and this document must not assume either.
 
-## Why this shape
+Status: design. Measured 2026-09-13 against a synthetic 12,000-run corpus; see
+Evidence for what those numbers do and do not support.
 
-KovaaK's installs to `C:\Program Files (x86)\Steam\...` by default, and Chrome
-refuses to hand a web page any directory under `Program Files`. That single
-fact determines the whole design, so it is worth recording exactly what was
-tried, because all three of these are closed and should not be re-litigated:
+## What this is for
 
-| Route | Result |
-|---|---|
-| `showDirectoryPicker()` on the install | Blocked: "contains system files" |
-| Junction in the user profile pointing *at* the install | Blocked — Chromium resolves the link and applies the blocklist to the target |
-| Drag-and-drop of the install folder | Blocked — the check is route-independent |
-| Dropping `stats/` alone, deeper in the tree | Blocked — every descendant, not just upper levels |
+Most people arriving here are **trying the tool**, not adopting it. They want to
+see whether their own data looks interesting before they agree to anything. So
+the first run must work on an unmodified default install, in whatever browser
+they have, with no setup — and it must reach something worth looking at fast.
 
-Also ruled out, for the record: `file://` needs a browser launch flag, native
-messaging needs an extension, Chrome's enterprise policies govern whether a site
-may use the API at all rather than the sensitive-path list, and KovaaK's has no
-configurable output directory (its `Config/` holds two JSON files and no path
-setting).
+Anyone who then decides they want live updates goes to steps two and three. This
+document's job is to be good enough that they want to.
 
-What *is* allowed: any ordinary path outside the blocked roots, reached by
-either access route. A junction is fine as long as it **resolves** somewhere
-permitted — which is what makes the redirect in Tier 1 work, and it is the
-opposite direction from the one that failed above.
+The entry point is therefore `<input type="file" webkitdirectory>`: a one-shot
+directory snapshot. Unlike the File System Access API it is not subject to
+Chrome's sensitive-path blocklist, so it reads a default
+`C:\Program Files (x86)\Steam\...` install directly, and it works in Firefox and
+Safari, which have no File System Access API at all. What it cannot do is look
+again without another user gesture — hence no live updates here.
 
-`<input type="file" webkitdirectory>` is not subject to the blocklist and reads
-the default install today. It buys reach at the cost of persistence and live
-updates, which is exactly the trade Tier 2 makes.
+If the browser *does* offer `showDirectoryPicker()` and the user's folder is
+readable, prefer it: same code past the source boundary, and it leaves the door
+open for step two. Do not require it.
 
-## The two tiers
+## IndexedDB is a cache, not a record
 
-**Tier 1 — live.** The browser holds a `FileSystemDirectoryHandle` on a
-readable directory. The index persists in IndexedDB, updates incrementally, and
-new runs appear without a page reload. The handle is stored in IndexedDB and its
-permission survives a restart — `queryPermission()` returns `granted` on a fresh
-load with nothing asked, so the folder is chosen once and never again. Reached
-two ways, neither of which the app can tell apart once it has the handle:
+The files on disk are the source of truth. The database only exists so that a
+return visit does not re-read 22,000 files. Everything follows from that:
 
-- Steam library already outside `Program Files` (a second drive, a custom
-  library folder) — pick the install folder, done, no setup at all.
-- Default install, redirected once by the user: move `stats/` and
-  `performances/` into the user profile and junction them back into the game
-  directory. The game writes through the junction unchanged; the browser picks
-  an ordinary profile folder and never touches a link.
+- **Migrations are "bump the version, drop it, re-bootstrap."** The same
+  strategy `index.py` already uses, for the same reason, and it stays valid here
+  because nothing lives only in the database.
+- **Eviction is survivable.** Browsers may clear best-effort origin storage, and
+  Safari does so after about seven days without interaction. The cost is a
+  re-pick and one bootstrap, not lost data. Call
+  `navigator.storage.persist()` after the first successful bootstrap to make it
+  less likely, record the answer, and treat a miss as normal rather than an
+  error.
+- **A cache with no source is stale, and must say so.** A returning visitor sees
+  their index immediately — that is the point of keeping it — but the app knows
+  only when it last read the folder, not what has happened since. Show the age
+  of the data and make re-picking one obvious click.
 
-**Tier 2 — snapshot.** `<input type="file" webkitdirectory>`: the user points at
-the install, Chrome confirms the file count, and the app reads everything once.
-Full history, every curve, every PB — but no live updates, and refreshing means
-picking the folder again. Works on the default install with no setup, and works
-in Firefox and Safari, which have no File System Access API at all.
+The only thing that genuinely degrades is convenience, and only in this tier: a
+re-bootstrap here needs a user gesture, where step two's would be silent.
 
-Tier 2 is the front door. Tier 1 is what a user upgrades to once they have
-decided they want it, and the app should only ever mention the redirect *after*
-they have seen their own data.
+## Source boundary
 
-### The redirect, for the docs
+Everything above the source is identical in both tiers, and step two plugs in
+here without surgery. A source provides:
 
-Verified end to end on a real install on 2026-09-13: 2,380 stats and 2,070
-`.perf` moved to the profile and junctioned back, a run played in-game landed
-both its `.csv` and its `.perf` in the profile folder, the in-game score history
-still displayed, and Steam's "verify integrity of game files" left the junctions
-untouched. KovaaK's must be closed while the move runs. No administrator rights
-are needed: Steam's folder already grants Users write access, which is why the
-game can write stats there unelevated.
+- `list()` — the run basenames it can offer
+- `read(basename)` — the `.csv` text and the `.perf` bytes, either possibly absent
+- `subscribe(fn)` — optional; absent in this document
 
-```bat
-set GAME="C:\Program Files (x86)\Steam\steamapps\common\FPSAimTrainer\FPSAimTrainer"
-mkdir "%USERPROFILE%\kvstats-data"
-move %GAME%\stats "%USERPROFILE%\kvstats-data\stats"
-move %GAME%\performances "%USERPROFILE%\kvstats-data\performances"
-mklink /J %GAME%\stats "%USERPROFILE%\kvstats-data\stats"
-mklink /J %GAME%\performances "%USERPROFILE%\kvstats-data\performances"
-```
+A `FileList` from the upload control satisfies the first two. A
+`FileSystemDirectoryHandle` satisfies all three. **The indexer must never see
+which it has.**
 
-To undo — `rmdir` on a junction removes the link, never the target:
+Equally load-bearing: the incremental path — *index these N new basenames into
+an existing database* — exists from day one, even though only a manual re-pick
+triggers it here. It is exactly the code an observer calls later. A bootstrap is
+then just the incremental path over an empty database, not a second
+implementation.
 
-```bat
-rmdir %GAME%\stats
-rmdir %GAME%\performances
-move "%USERPROFILE%\kvstats-data\stats" %GAME%\stats
-move "%USERPROFILE%\kvstats-data\performances" %GAME%\performances
-```
-
-The user then points the app at `%USERPROFILE%\kvstats-data`.
-
-## Measured budget
-
-Synthetic corpus: 11,993 stats files, 10,454 `.perf`, 316 distinct scenarios,
-298,653 kill rows, 165 MB on disk. Chosen because `.perf` files are recent and
-heavy users will have far more than the 2,070 on the author's machine; several
-costs below are invisible at 2,000 runs and dominant at 12,000.
-
-| Phase | Tier 1 (FSA) | Tier 2 (upload) |
-|---|---|---|
-| Enumerate (handles, both dirs) | 11,781 ms | 58 ms after the dialog |
-| Read stats (39.9 MB) | 3,279 ms | 8,039 ms |
-| Read perf (55.7 MB) | 5,461 ms | 6,987 ms |
-| Parse stats | 639 ms | 733 ms |
-| Parse perf | 527 ms | 541 ms |
-| Materialise marks | 41 ms | 50 ms |
-| Write runs | 1,370 ms | 4,305 ms |
-| Write curves | 853 ms | 832 ms |
-| Write kills (packed) | 756 ms | 777 ms |
-| **Bootstrap total** | **24.7 s** | **22.3 s** |
-| Resulting database | 45.3 MB | 49.3 MB |
-
-Read concurrency matters and then stops mattering: 1.391 ms/file serial,
-0.271 ms at 8 parallel, 0.262 ms at 32, 0.279 ms at 128. Use a pool of 16–32
-and do not tune further.
-
-Re-opening in Tier 1 does not repeat the 24.7 s. Only names are needed to find
-new files, and a names-only enumeration (`.keys()`, not `.entries()`) costs
-~2.2 s per directory at this scale. Render from IndexedDB immediately and
-reconcile in the background.
-
-## Live updates
-
-`FileSystemObserver` works: attached to `stats/`, it reported a new file within
-the same second it was written, so there is no polling loop and no 2.2 s sweep
-in the steady state. Keep the names-only enumeration only as the
-reconcile-on-open path, and as a fallback if the constructor is missing.
-
-One new run raises **several** events — `appeared` when the file is created,
-then `modified` as the game writes its contents. The indexer must coalesce
-events per filename and wait for quiet before reading, or it will parse a
-half-written `.csv`. Do not index directly off an event; debounce, then read.
-
-The `.perf` is written a moment after the `.csv` — about two seconds apart in
-testing. A run whose `.perf` has not landed yet should be indexed without a
-curve and upgraded when the second event arrives, which is the same state the
-index already supports for the runs that never get one.
+`id` is derived from the basename, which is stable across tiers and across
+machines, and is what makes a re-pick reconcile instead of duplicate. It must
+not be a row counter and must not embed an absolute path — `index.py` keys on
+`stats_file` as an absolute path today, and that does not survive a browser
+where absolute paths do not exist.
 
 ## Storage
 
-Two decisions were settled by measurement and should not be revisited casually.
+Two layout decisions were settled by measurement and should not be revisited
+casually.
 
 **Kills are packed one record per run, never one per kill.** 298,653 individual
 records took 28,354 ms to write; the same data as 8,875 packed records took
-756 ms — 37× — and it also *reads* faster, 4.7 ms against 16.2 ms for the
+756 ms — 37× — and it also reads faster, 4.7 ms against 16.2 ms for the
 per-slot aggregate. Per-kill rows look reasonable at 2,000 runs and fall off a
 cliff at 12,000.
 
-**`best_before` and `played_before` are materialised at index time.** They
-depend only on runs older than the row, so they never change once written. One
-forward pass over runs sorted by `started_at` costs 41 ms and turns the rail's
-correlated subqueries into a plain cursor walk: 4.2 ms against 296 ms.
+**`best_before` and `played_before` are materialised at index time**, turning
+the rail's correlated subqueries into a cursor walk: 4.2 ms against 296 ms.
 
 ```
-runs          keyPath "id"
+runs          keyPath "id"            -- derived from the basename
               index started_at
               index scen_time   ["scenario", "started_at"]
-              index scen_score  ["scenario", "score"]   -- the PB run's id, for
-                                                        loading its curve as a
-                                                        baseline
-              fields: the Stats.csv summary, plus buckets, plus the four
-              materialised marks (best_before, played_before, and the
-              same_cfg variants best_before_cfg, played_before_cfg)
+              index scen_score  ["scenario", "score"]   -- the PB run, for its curve
+              fields: the Stats.csv summary, buckets, and the materialised
+              marks (best_before, played_before, and the same_cfg variants)
 
 curves        keyPath "run_id"
               { run_id, buckets, series: [7 ArrayBuffers] }
               order: shots, hits, misses, dmg_done, dmg_possible, score, kills
 
-kills         keyPath "run_id"   -- packed, one record per run
-              { run_id, n, t, dmg_done, dmg_possible, shots, hits: ArrayBuffers,
-                bots: string[] }
+kills         keyPath "run_id"        -- packed: typed arrays plus a bots array
 
-scenarios     keyPath "name"     -- maintained aggregate, see below
-meta          schema version, indexed filename set
+scenarios     keyPath "name"          -- maintained aggregate
+              runs, pb, last_played, rolling last-10, AND the full shape record:
+              shape, penalising, budget, pool, bots, clock_s, windowed, evidence
+
+failed        keyPath "basename"      -- parse failures with a try count
+
+meta          schema version, the indexed basename set, last-read timestamp
 ```
 
-`scenarios` is new. The scenario list is the one query that stays slow as a
-scan (247 ms), and it is a page people open constantly; maintaining it on write
-is the same trick already used for the run marks.
+`scenarios` carries the **shape** fields, not just the list-page aggregate.
+`shapes.py` classification is structural — `compare.page()` exempts race
+scenarios from the duration-tolerance rule, and `build_run_payload` branches
+entirely on shape — so a schema without it silently reverts the 2026-09-12
+design. Note that classification is a fold that can flip retroactively: a
+scenario becomes race on its first `.perf`, and `fixed_windows` needs at least
+two runs. Recompute a scenario's shape whenever a run is added to it, and
+recompute the affected runs' marks when it changes (see below).
+
+`failed` mirrors the Python's table and its `MAX_TRIES` budget. The spec expects
+half-written files; without a retry ceiling a genuinely corrupt one is either
+re-parsed forever or dropped silently.
+
+### Marks are materialised, not immutable
+
+An earlier draft claimed the marks "never change once written." That is false
+outside strict append order. They must be recomputed when:
+
+- a run is inserted **older** than one already indexed — a re-pick after a
+  restored backup, or any out-of-order arrival;
+- a scenario's **shape** changes, because the race exemption changes which prior
+  runs count.
+
+Recomputing is a forward pass from the earliest affected `started_at`, which
+costs 41 ms over the whole 12k corpus. Cheap enough that the rule can simply be:
+detect the condition, walk forward, done.
+
+### Multi-tab
+
+Two tabs share one database and will both try to index and both read-modify-write
+the maintained aggregates — a lost update that does not self-heal, because the
+aggregates are maintained rather than derived on read. Elect a writer with Web
+Locks; other tabs read. This is cheap now and very annoying to retrofit.
 
 ## Queries, translated
 
-These were written and timed against the schema above. Median of 5 at 12k runs.
-Reproduce them rather than re-deriving them.
+Written and timed against the schema above; median of 5 at 12k runs. Reproduce
+rather than re-derive.
 
-**Run rail — `compare.page()`.** The SQL decorates each row with
-`(SELECT MAX(p.score) ... )` and `(SELECT COUNT(*) ... )` over prior runs of the
-same scenario. With the marks materialised this is a cursor walk on
-`started_at` descending; `before` becomes the cursor's upper bound. **4.2 ms**,
-and **3.6 ms** for a page 10,000 rows deep — paging stays flat.
+**Run rail — `compare.page()`.** With the marks materialised this is a cursor
+walk on `started_at` descending; `before` becomes the cursor's upper bound.
+**4.2 ms**, and **3.6 ms** at 10,000 rows deep — paging stays flat.
 
 ```js
 const idx = db.transaction("runs").objectStore("runs").index("started_at");
@@ -208,12 +175,12 @@ await new Promise((res, rej) => {
 });
 ```
 
-Computing those marks per row instead costs **296 ms** — 70× worse. Recorded so
-the shortcut is not mistaken for a premature optimisation.
+Computing the marks per row instead costs **296 ms**, 70× worse — recorded so
+the materialisation does not read as premature optimisation.
 
-**Peer set — `compare.candidates()`.** Every run of a scenario, in time order.
-Served directly by `scen_time`. **2.0 ms**. Filter `cfg_key` and the duration
-tolerance in JS afterwards; the index does the expensive part.
+**Peer set — `compare.candidates()`.** Served directly by `scen_time`, **2.0 ms**.
+Apply the `cfg_key` filter, the duration tolerance, and the race exemption in JS
+afterwards; the index does the expensive part.
 
 ```js
 const st = db.transaction("runs").objectStore("runs").index("scen_time");
@@ -221,9 +188,8 @@ const peers = await req(st.getAll(
   IDBKeyRange.bound([scenario, ""], [scenario, "\uffff"])));
 ```
 
-**Best per slot — `_best_by_slot()`.** The SQL is
-`SELECT idx, MAX(expr) FROM kill WHERE run_id IN (...) GROUP BY idx`. Packed,
-it is a get per peer and a loop over typed arrays. **4.7 ms** over 30 peers.
+**Best per slot — `_best_by_slot()`.** `GROUP BY idx` becomes a get per peer and
+a loop over typed arrays. **4.7 ms** over 30 peers.
 
 ```js
 const os = db.transaction("kills").objectStore("kills");
@@ -232,120 +198,144 @@ for (const id of peerIds) {
   const p = await req(os.get(id)); if (!p) continue;
   const dd = new Float32Array(p.dmg_done), dp = new Float32Array(p.dmg_possible);
   for (let j = 0; j < p.n; j++) {
-    if (!dp[j]) continue;                       // NULL guard: no damage offered
+    if (!dp[j]) continue;                       // no damage offered
     const share = dd[j] / dp[j], cur = best.get(j + 1);
     if (cur === undefined || share > cur) best.set(j + 1, share);
   }
 }
 ```
 
-**Scenario list.** `GROUP BY scenario` with correlated subqueries for `pb`,
-`recent_form` and the race-shape equivalents. As a full scan: **247 ms**.
-Maintain the `scenarios` store on write instead; the scan below is the
-rebuild-from-scratch path.
+**Scenario list.** Read the maintained `scenarios` store. The full scan below is
+only the rebuild path: **247 ms**.
 
-```js
-const c = db.transaction("runs").objectStore("runs").openCursor();
-// accumulate per scenario: runs, pb, last_played, and a rolling last-10 for
-// recent_form / recent_elapsed
-```
-
-**Day view.** `substr(started_at,1,10) = ?` becomes a bounded range on
-`started_at`, since the field is a sortable ISO string. **1.0 ms**.
+**Day view.** `substr(started_at,1,10) = ?` becomes a bounded range, since the
+field is a sortable ISO string. **1.0 ms**.
 
 ```js
 idx.getAll(IDBKeyRange.bound(day + "T00:00:00", day + "T23:59:59"))
 ```
 
-**Curves for a run view** — the run's own, its PB, and recent form. Eleven gets
-on `curves`: **1.8 ms**. Store and read the series as `ArrayBuffer`; IndexedDB
-handles them natively and no encoding step is needed.
+**Curves for a run view** — eleven gets on `curves`, **1.8 ms**. Store the series
+as `ArrayBuffer`; IndexedDB handles them natively, no encoding step.
+
+## The real work is the payload builder
+
+The queries above are the easy half and translating them is nearly done. The
+bulk of `server.py`'s 650 lines is not queries:
+
+- `build_run_payload` / `_fill_timed` / `_fill_race` — metric selection,
+  smoothing, baseline resolution, `compare_until`'s tail marking
+- `_race_splits` — dead-time residual and `delta_adj`, which sums to zero by
+  construction
+- `_bot_windows` and `_window_summary` — per-window share against PB and recent
+  form, weighted rather than an unweighted mean of per-window shares
+- all of `compare.py` — `cumulative_delta`'s pad-don't-truncate invariant,
+  `resample_race`, `race_grid`, `band`'s three-curve rule
+
+Every one carries a comment recording something learned the hard way. Budget for
+this as the main body of work, not as a detail of "porting the API."
+
+## Verification
+
+**The parsers are ported and agree with the Python across the repository's
+fixtures** — 11 stats files and 7 `.perf`, including the truncated one, zero
+differences on every summary field, `cm360`, `cfg_key`, kill counts and offsets,
+bucket counts, durations, and all seven series sums.
+
+That is real but not sufficient: 11 files chosen *because* they exercise known
+traps cannot retire the risk. **The exit criterion is a full-corpus oracle
+diff** — the frozen Python and the JS over a complete real install, every field
+compared. Specifically not yet covered: float formatting (Python's `round()` is
+banker's rounding, JS's is not, and `cfg_key` is rounded to 1 dp — a one-ulp
+disagreement silently changes which runs are comparable), non-ASCII scenario
+names through `TextDecoder`, and truncated or malformed CSVs.
+
+The same oracle applies to the payload builder: same run id, same options,
+Python JSON against JS JSON, byte-identical.
+
+Two traps are already encoded in the port and must stay encoded:
+
+- A `.perf` metric is *omitted* for any second in which it was zero, so sample
+  order is not time order. Series are rebuilt on a dense `floor(timestamp)` grid.
+- Within a sample, integer series are protobuf varints while float ones are
+  fixed32. Reading only the fixed32s parses cleanly and silently yields zeros
+  for four of the seven series.
+
+**`scripts/drive-client.mjs` does not survive as-is.** It is `fetch()` against a
+running server on `:8777` plus an `EventSource` stub; with the server gone there
+is nothing to connect to, and Node has no IndexedDB. Reviving it means either a
+dev dependency in a repo whose stated virtue is having none, or keeping the
+Python server alive purely as a test fixture. Decide this deliberately — it is a
+real work item, not a footnote.
+
+## Evidence
+
+Every number here is **one run, one machine, one browser, one disk**, against a
+*synthetic* corpus. That supports the relative conclusions strongly — the 37×
+packing win, the 70× marks win, flat deep paging, the shape of the concurrency
+curve — because both sides of each comparison ran under identical conditions.
+
+It supports the absolute wall-clock numbers much more weakly. Synthetic files
+have uniform sizes and names and were written in one pass; a real folder is nine
+months of interleaved writes. The reads were very likely warm-cache, and a real
+first run is cold, on unknown hardware, with an antivirus scanning 22,000 file
+opens by a browser process — the workload Defender is most expensive on. Treat
+the 22–25 s bootstrap as a lower bound, plausibly several times higher in the
+field, and note it is the only number a new user ever experiences.
+
+Untested and worth knowing before promising anything: peak memory (Tier 2 hands
+the page 22,000 `File` objects and reads 95 MB), behaviour when the tab is closed
+mid-bootstrap, and Firefox and Safari entirely — despite cross-browser reach
+being half of this tier's case.
+
+| Phase (12k runs, upload tier) | |
+|---|---|
+| Enumerate after the dialog | 58 ms |
+| Read stats (39.9 MB) | 8,039 ms |
+| Read perf (55.7 MB) | 6,987 ms |
+| Parse stats (298,653 kill rows) | 733 ms |
+| Parse perf (10,454 files) | 541 ms |
+| Materialise marks (316 scenarios) | 50 ms |
+| Write runs / curves / packed kills | 4,305 / 832 / 777 ms |
+| **Total** | **22.3 s**, 49 MB database |
+
+Read concurrency: 0.925 ms/file serial, 0.175 ms at 8 parallel, 0.279 at 32,
+0.190 at 128. A pool of 8–32 is right on this machine; do not hard-code a
+number tuned on one device, and never assume high concurrency helps on a
+spinning disk or a network-redirected profile.
 
 ## The frontend
 
-Unchanged in kind. `kvstats/web/` is already a static page — `app.js`,
-`style.css`, and a vendored uPlot, no build step — talking to a small JSON API.
-The work is replacing that API's implementation, not the UI: the fetches become
-IndexedDB reads returning the same shapes. `scripts/drive-client.mjs`, which
-already exercises `app.js` under a stub DOM, keeps working and becomes more
-valuable, since there is no longer a Python server to test against.
-
-## Parsers
-
-`kvstats/perf.py` and `kvstats/statscsv.py` were ported to JS and verified
-against the repository's own fixtures: 11 stats files and 7 `.perf` files,
-including the truncated one, produce **zero differences** — every summary field,
-`cm360`, `cfg_key`, kill count, kill offsets, bucket count, duration, and all
-seven series sums. The port is the main correctness risk in this project and it
-is retired.
-
-Two traps cost real time and are now encoded in the port:
-
-- A `.perf` metric is *omitted* for any second in which it was zero, so sample
-  order is not time order. Every series must be rebuilt on a dense
-  `floor(timestamp)` grid.
-- Within a sample, integer series (shots, hits, misses, kills) are protobuf
-  varints while the float ones (score, damage) are fixed32. Reading only the
-  fixed32s silently yields zeros for four of the seven series — it parses
-  cleanly and produces wrong numbers.
-
-`tests/fixtures/kvstats/` is the shared asset between the Python and the JS.
-Keep both suites pointed at it; it is what makes the two implementations
-comparable rather than merely similar.
+`kvstats/web/` is already static — `app.js`, `style.css`, a vendored uPlot, no
+build step — talking to a small JSON API. The API's *implementation* changes;
+the payload shapes should not. Keep them identical so the oracle diff above can
+compare them directly.
 
 ## The Python
 
-Frozen, not deleted. It remains the reference implementation and the oracle the
-JS is diffed against, and it is the only option for anyone who wants live
-updates without redirecting anything. No new features land there. Retire it
-only once the web app reaches parity, and not before the fixtures-based diff is
-running in CI.
+Frozen: no new features, kept as the reference implementation and the oracle.
+It also remains the only live option for anyone who has Python and will not
+modify their install, which is a larger group than it sounds.
 
-## Repository
-
-kvstats moves to its own repository. It shares no code with
-`kovaaks-playlists` — no import crosses between them in either direction — and
-the audiences do not overlap: one is for Claude Code users who clone a repo, the
-other is for KovaaK's players who want a link. A player being sent to something
-called `claude-kovaaks` for a stats dashboard is being misinformed about what it
-is and what it needs. The web app also wants its own GitHub Pages origin.
-
-Carry the history across with `git filter-repo`. The format notes in
-`references/kovaaks.md` get duplicated into both; it is prose, and duplicating
-109 lines costs less than a dependency between two repositories.
-
-## Settled by testing
-
-All five questions this design opened were answered on 2026-09-13. Recorded so
-they are not reopened:
-
-1. **A stored handle survives a reload.** `queryPermission()` returns `granted`
-   on a fresh page load having asked nothing. Tier 1 is chosen once, ever — no
-   per-visit click, and no need for a PWA install to earn persistence.
-2. **`FileSystemObserver` fires**, within the same second as the write. See
-   Live updates above for the debounce this requires.
-3. **The redirect works end to end**, including a real run written by the game
-   through the junction.
-4. **Steam's verify-integrity leaves the junctions alone.**
-5. **The blocklist covers every descendant** of `Program Files`, not just its
-   upper levels.
-
-## Open questions
-
-None blocking. Two worth settling during implementation:
-
-- **How stale may Tier 2 data be?** A returning Tier 2 visitor has their old
-  index in IndexedDB and no way to know whether it is current. Showing it
-  immediately is right; what the app says about its age, and how loudly it
-  offers a re-pick, is a UI decision this spec does not make.
-- **Non-Windows.** The redirect is Windows-specific. Linux and macOS installs
-  put the game elsewhere and are likely reachable by the picker directly, but
-  no one has checked.
+Retirement is deliberately not scheduled here. The previously stated condition —
+"once the fixtures diff runs in CI" — is unreachable: there is no CI in this
+repository and standing it up (Python, Node, fixtures, a differential harness)
+is unscoped work. Either scope that separately or stop treating retirement as
+imminent.
 
 ## Out of scope
 
-Game settings, benchmark rank tracking, any upload of a user's data anywhere,
-and anything resident in the background. The app reads files the user points it
-at and writes only to its own origin storage. It never writes to the KovaaK's
-install — the redirect in Tier 1 is performed by the user, once, with commands
-they can read and undo.
+Live updates, the access problem for default installs, game settings, benchmark
+rank tracking, and any upload of user data anywhere. Note the wording collision:
+Chrome's directory control shows *"Upload N files to this site?"* — nothing is
+uploaded, and the UI must say so before the dialog appears, because it is the
+first thing a new user reads.
+
+## Open questions
+
+- **How loudly should staleness be reported?** The app knows when it last read
+  the folder and nothing since. Age is easy; how insistently to prompt a re-pick
+  is a UI decision this document does not make.
+- **Non-Windows.** Linux and macOS installs are likely reachable by the picker
+  directly, which would make them Tier 1 by default. Nobody has checked.
+- **What replaces `drive-client.mjs`**, given the constraints above.
