@@ -384,6 +384,16 @@ a{color:var(--band)} a:hover{color:var(--ink)}
    stable gutter there reserves a permanent empty strip under every table. */
 .stage, .sheet, .runlist{scrollbar-gutter:stable}
 
+/* One pair of rules decides the thumb colour, and both rendering branches
+   below just read --thumb. Custom properties inherit into pseudo-elements, so
+   setting the variable on a scrollport is enough to recolour its own bar --
+   which is what keeps hover to a single selector list instead of one per
+   branch. Scoped to the scrollports rather than *:hover, because :hover
+   matches every ancestor under the pointer and a universal rule would light
+   up every scrollbar on the page at once. */
+html, .stage, .sheet, .runlist, .table-wrap{--thumb:var(--line-2)}
+.stage:hover, .sheet:hover, .runlist:hover, .table-wrap:hover{--thumb:var(--ghost)}
+
 /* The two styling mechanisms are mutually exclusive, not layered. Chromium
    supports both, and the moment `scrollbar-color` is set it stops applying
    ::-webkit-scrollbar to that element -- so declaring them together would
@@ -392,10 +402,7 @@ a{color:var(--band)} a:hover{color:var(--ink)}
 @supports not selector(::-webkit-scrollbar){
   html, .stage, .sheet, .runlist, .table-wrap{
     scrollbar-width:thin;
-    scrollbar-color:var(--line-2) transparent;
-  }
-  .stage:hover, .sheet:hover, .runlist:hover, .table-wrap:hover{
-    scrollbar-color:var(--ghost) transparent;
+    scrollbar-color:var(--thumb) transparent;
   }
 }
 
@@ -404,23 +411,18 @@ a{color:var(--band)} a:hover{color:var(--ink)}
   ::-webkit-scrollbar-track,
   ::-webkit-scrollbar-corner{background:transparent}
   /* A transparent border plus content-box clipping paints a 4px thumb inside
-     a 10px track, which is what keeps it off the edge without a channel. */
+     a 10px track, which is what keeps it off the edge without a channel.
+     background-color, not the background shorthand: the shorthand resets
+     background-clip to border-box, and the thumb would fill the gutter. */
   ::-webkit-scrollbar-thumb{
-    background:var(--line-2);
+    background-color:var(--thumb);
     background-clip:content-box;
     border:3px solid transparent;
     border-radius:999px;
   }
-  /* Scoped to the scrollports themselves rather than *:hover -- :hover matches
-     every ancestor under the pointer, so a universal rule would light up every
-     scrollbar on the page at once. */
-  .stage:hover::-webkit-scrollbar-thumb,
-  .sheet:hover::-webkit-scrollbar-thumb,
-  .runlist:hover::-webkit-scrollbar-thumb,
-  .table-wrap:hover::-webkit-scrollbar-thumb{
-    background:var(--ghost);
-    background-clip:content-box;
-  }
+  /* Grabbing the bar itself brightens it once more, wherever the pointer came
+     from -- this one fires on the thumb's own hover, not the container's. */
+  ::-webkit-scrollbar-thumb:hover{background-color:var(--faint)}
 }
 
 /* ── narrow / mobile ─────────────────────────────────────── */
