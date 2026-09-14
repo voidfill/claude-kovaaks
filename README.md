@@ -42,37 +42,6 @@ with code 3 and is left untouched. If you edit a skill-made playlist in-game and
 rewrites the author field, the skill will stop being able to edit it — that is the safe
 direction, and you can always clone it again.
 
-## kvstats
-
-A localhost dashboard over your KovaaK's run history. It watches the game's output
-and, about a second after a run ends, shows that run's per-second curve against your
-PB and your recent form — so you can see not just whether you did better, but where
-in the run you did.
-
-```
-python -m kvstats
-```
-
-Then open the printed URL. Stdlib only, no install, no build step; it works offline.
-
-The first launch indexes your whole history into a SQLite cache outside the game directory
-(about 5 s for ~2330 runs, producing a database of about 6.3 MB). After that it only reads
-new files. The cache is disposable — delete it and it rebuilds.
-
-**It never writes to the KovaaK's install.**
-
-Three things worth knowing about the data:
-
-- KovaaK's writes a `.perf` time-series alongside most runs, but not all — runs
-  without one still appear, just without a curve.
-- Runs are only compared against runs at the same true sensitivity (cm/360), since
-  comparing across a sens change is not a fair comparison. Toggle it off in the UI if
-  you want to compare anyway.
-- Not every scenario is scored on a clock. Some spawn a fixed number of bots and
-  score you on how long you took (`score = 1000 - elapsed`). Those are charted
-  against share of the damage pool rather than seconds, so bot boundaries line up
-  between runs, and the delta chart reads in seconds gained or lost.
-
 ## Layout
 
 ```
@@ -80,32 +49,13 @@ Three things worth knowing about the data:
     SKILL.md             the skill Claude reads
     scripts/kvpl.py      the CLI, single file, stdlib only
     references/kovaaks.md   on-disk format and API notes, verified against a real install
-kvstats/                 the dashboard: parser, index, watcher, server, web assets
-tests/                   unit tests for the playlist CLI and every kvstats module
-scripts/drive-client.mjs drives kvstats' own app.js against a running server
+tests/                   unit tests for the playlist CLI
 docs/                    design spec
 ```
 
 ```
 python -m unittest discover -s tests
 ```
-
-The unit tests cover the Python. The dashboard's browser half has one extra
-rig, kept out of the suite on purpose — it needs node and a live server, and a
-test that silently skips when it cannot find either reports green while
-covering nothing. Run it by hand after touching the rail, the paging, or the
-run-time formatting:
-
-```
-python -m kvstats                 # one terminal
-node scripts/drive-client.mjs     # another
-```
-
-It loads `kvstats/web/app.js` — the same file the browser gets, unmodified on
-disk — under a stub DOM, so it exercises the real client rather than a copy of
-it. What it cannot see is what the browser does for itself: CSS, layout, event
-dispatch. Those still want eyes on the page. Exit 0 passed, 1 failed, 2 could
-not reach the server; `--port=` or `--base=` if it is not on 8777.
 
 To use the skill outside this repo as well, link the skill directory into your personal
 skills folder. Symlinked skill directories are supported, and a junction (`/J`) needs no
@@ -119,10 +69,8 @@ mklink /J "%USERPROFILE%\.claude\skills\kovaaks-playlists" ^
 
 ## Scope
 
-Two tools, deliberately separate:
+Playlists only — the skill never reads your stats. The run-history dashboard that used to
+live here as `kvstats` is now [aimcurve](https://github.com/voidfill/aimcurve), its own
+repository under its own name.
 
-- **`kovaaks-playlists`** — the Claude Code skill. Playlists only; it never reads stats.
-- **`kvstats`** — a local dashboard over your run history. Read-only; it never writes
-  to the game.
-
-Game settings and benchmark rank tracking remain out of scope for both.
+Game settings and benchmark rank tracking remain out of scope.
